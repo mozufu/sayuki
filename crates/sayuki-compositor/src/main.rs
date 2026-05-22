@@ -4,7 +4,8 @@ use calloop::EventLoop;
 use clap::Parser;
 use smithay::{
     backend::{renderer::gles::GlesRenderer, winit},
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
     reexports::wayland_server::Display,
     wayland::socket::ListeningSocketSource,
 };
@@ -13,6 +14,8 @@ use tracing::{debug, error, info};
 use crate::{cli::Args, logging::init_tracing, state::SayukiState, wayland::ClientState};
 
 mod cli;
+mod grabs;
+mod key_daemon;
 mod logging;
 mod output;
 mod state;
@@ -50,13 +53,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     })?;
 
+    state.set_wayland_display(socket_name.clone());
+
     info!(socket = %socket_name, "Sayuki is listening for Wayland clients");
     println!("Sayuki is running. Start clients with WAYLAND_DISPLAY={socket_name}");
 
     while state.running {
         event_loop.dispatch(Some(FRAME_INTERVAL), &mut state)?;
         display.dispatch_clients(&mut state)?;
-        state.output.cleanup();
+        state.refresh_space();
         display.flush_clients()?;
         state.render()?;
     }
@@ -65,6 +70,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 delegate_compositor!(SayukiState);
+delegate_data_device!(SayukiState);
 delegate_output!(SayukiState);
 delegate_seat!(SayukiState);
 delegate_shm!(SayukiState);
+delegate_xdg_shell!(SayukiState);

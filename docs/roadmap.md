@@ -23,17 +23,19 @@ Status: complete in `crates/sayuki-compositor`.
 This should be the first implementation target because it can run under an
 existing desktop session.
 
-### 2. Basic `xdg-shell` window management
+### 2. Basic `xdg-shell` window management ✅
 
 Make regular desktop clients appear and be controllable.
 
-- support `xdg-shell` toplevel surfaces
-- map/unmap windows into a Smithay `Space`
-- handle frame callbacks
-- implement pointer and keyboard focus
-- support click-to-focus
-- support interactive move and resize
-- keep a simple floating stack
+Status: complete in `crates/sayuki-compositor`.
+
+- [x] support `xdg-shell` toplevel surfaces
+- [x] map/unmap windows into a Smithay `Space`
+- [x] handle frame callbacks
+- [x] implement pointer and keyboard focus
+- [x] support click-to-focus
+- [x] support interactive move and resize
+- [x] keep a simple floating stack
 
 ### 3. Input and compositor actions
 
