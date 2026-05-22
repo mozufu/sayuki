@@ -34,12 +34,16 @@ Use `cargo run -p sayuki-compositor` to run the starter binary.
 
 - `Cargo.toml`: workspace membership, shared package metadata, and lints.
 - `flake.nix`: development shell and formatter configuration.
+- `docs/roadmap.md`: current compositor milestones, reference-first policy, and
+  planned crate split.
 - `crates/sayuki-compositor`: starter binary crate for compositor work.
 
 ## Coding Guidelines
 
 - Keep crates on the workspace Rust edition and shared lint configuration.
 - Prefer workspace-level dependency and lint configuration when adding crates.
+- Check `docs/roadmap.md` before planning sizeable compositor features, and keep
+  roadmap status updated when milestones change.
 - Keep compositor-specific code inside `crates/sayuki-compositor` until a clear
   shared abstraction is needed.
 - Maintain a reasonable modular split: keep files focused on one responsibility,

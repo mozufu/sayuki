@@ -4,6 +4,12 @@ Sayuki is planned as a Smithay-based Wayland compositor. The early goal is to
 make the compositor easy to iterate on in a nested session before investing in a
 full DRM/GBM/libinput backend.
 
+Guiding shortcut: prefer proven compositor building blocks over custom plumbing.
+Start from Smithay's high-level APIs and example patterns, especially `anvil`,
+then borrow policy ideas from mature compositors such as `niri`, `cosmic-comp`,
+`sway`, `river`, and `dwl`. Only drop to raw Wayland protocol handling or custom
+rendering when Smithay does not already provide the needed abstraction.
+
 ## Milestones
 
 ### 1. Nested Smithay compositor ✅
@@ -41,17 +47,25 @@ Status: complete in `crates/sayuki-compositor`.
 
 Make the compositor comfortable enough for daily development testing.
 
-- load an xkb keymap
-- track modifiers
-- define compositor actions such as quit, spawn terminal, move/resize, and
+Status: in progress. The nested compositor already forwards normal keyboard and
+pointer input, and has a first hard-coded compositor shortcut.
+
+- [x] track modifiers through Smithay's keyboard input path
+- [x] add a first compositor action: `Alt+Enter` spawns `ghostty`
+- [x] suppress compositor-handled key presses so clients do not also receive them
+- [x] support pointer motion, buttons, and axis events
+- [ ] load a configurable xkb keymap
+- [ ] replace the hard-coded key daemon with an action/keybinding registry
+- [ ] define compositor actions such as quit, spawn command, move/resize, and
   workspace switching
-- add configurable keybindings
-- support pointer motion, buttons, axis events, and cursor images
+- [ ] add configurable keybindings
+- [ ] support client-provided cursor images
 
 ### 4. Real hardware backend
 
 After the nested backend is usable, add the native backend for running from a
-TTY.
+TTY. Shortcut: port the shape of Smithay `anvil`'s udev/DRM/libinput backend
+first, then abstract only the parts Sayuki actually needs to differ.
 
 - discover DRM devices through udev
 - initialize GBM/EGL/GLES rendering
@@ -74,12 +88,15 @@ Move from "example compositor" behavior to Sayuki's own policy.
 
 ### 6. Desktop protocols and polish
 
-Add protocols as the compositor needs them.
+Add protocols as the compositor needs them. Prefer Smithay protocol handlers and
+helpers before adding generated protocol glue directly. Prioritize protocols that
+unblock real applications in nested testing.
 
 - `xdg-output`
 - `xdg-decoration`
 - layer shell for panels, backgrounds, and notifications
-- data device and clipboard
+- data device and clipboard validation beyond the existing basic data-device
+  plumbing
 - primary selection
 - viewporter
 - fractional scale
@@ -97,6 +114,20 @@ Make Sayuki scriptable and configurable.
 - support live reload where safe
 - expose a Unix socket IPC protocol
 - add an optional `sayukictl` binary
+
+## Reference-first development policy
+
+Before implementing a sizeable compositor feature, check whether Smithay already
+has a helper, handler, render element, or example implementation. Good default
+sources to inspect:
+
+- Smithay `anvil` for backend setup, event loop integration, protocol handlers,
+  grabs, and output management
+- `niri` and `cosmic-comp` for production Smithay architecture
+- `sway`, `river`, and `dwl` for window-management policy and configuration UX
+
+Prefer adapting the smallest useful piece over designing a general abstraction in
+advance.
 
 ## Workspace crate plan
 
