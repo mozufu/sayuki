@@ -6,17 +6,19 @@ full DRM/GBM/libinput backend.
 
 ## Milestones
 
-### 1. Nested Smithay compositor
+### 1. Nested Smithay compositor ✅
 
 Build the first usable compositor against Smithay's nested `winit` backend.
 
-- initialize the Smithay display and `calloop` event loop
-- create and advertise a Wayland socket
-- define the root compositor state type
-- create one logical output
-- render a simple background
-- wire basic seat, keyboard, and pointer state
-- accept simple Wayland clients
+Status: complete in `crates/sayuki-compositor`.
+
+- [x] initialize the Smithay display and `calloop` event loop
+- [x] create and advertise a Wayland socket
+- [x] define the root compositor state type
+- [x] create one logical output
+- [x] render a simple background
+- [x] wire basic seat, keyboard, and pointer state
+- [x] accept simple Wayland clients
 
 This should be the first implementation target because it can run under an
 existing desktop session.
