@@ -42,6 +42,10 @@ Use `cargo run -p sayuki-compositor` to run the starter binary.
 - Prefer workspace-level dependency and lint configuration when adding crates.
 - Keep compositor-specific code inside `crates/sayuki-compositor` until a clear
   shared abstraction is needed.
+- Maintain a reasonable modular split: keep files focused on one responsibility,
+  split large modules before they grow unwieldy, and prefer small cohesive
+  submodules over monolithic files (avoid creating or expanding 1000+ line files
+  unless there is a strong, documented reason).
 - Do not bypass the Nix shell when validating changes that depend on native
   libraries.
 - Avoid committing generated build artifacts or local environment files.
