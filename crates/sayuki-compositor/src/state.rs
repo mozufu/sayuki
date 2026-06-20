@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    io::{self, ErrorKind},
     time::{Duration, Instant},
 };
 
@@ -11,22 +12,26 @@ use smithay::{
         },
         renderer::{
             Color32F, Frame, Renderer,
+            element::{Kind, surface::render_elements_from_surface_tree},
             gles::GlesRenderer,
             utils::{draw_render_elements, with_renderer_surface_state},
         },
         winit::{WinitEvent, WinitGraphicsBackend, WinitInput},
     },
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{PopupManager, Space, Window, WindowSurfaceType, utils::send_frames_surface_tree},
     input::{
         Seat, SeatState,
         keyboard::KeyboardHandle,
-        pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
+        pointer::{
+            AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus,
+            GrabStartData as PointerGrabStartData, MotionEvent, PointerHandle,
+        },
     },
     output::Output,
     reexports::wayland_server::{Display, protocol::wl_surface::WlSurface},
     utils::{IsAlive, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
-        compositor::CompositorState,
+        compositor::{CompositorState, with_states},
         selection::data_device::DataDeviceState,
         shell::xdg::{ToplevelSurface, XdgShellState},
         shm::ShmState,
@@ -35,7 +40,9 @@ use smithay::{
 use tracing::{debug, info};
 
 use crate::{
-    key_daemon::{KeyAction, KeyDaemon},
+    config::SayukiConfig,
+    grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
+    input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
     output::{configure_output, create_output},
 };
 
@@ -52,7 +59,8 @@ pub(crate) struct SayukiState {
     pub(crate) space: Space<Window>,
     pub(crate) popups: PopupManager,
     pub(crate) windows: Vec<Window>,
-    key_daemon: KeyDaemon,
+    action_runner: ActionRunner,
+    keybindings: KeybindingRegistry,
 
     backend: WinitGraphicsBackend<GlesRenderer>,
     pub(crate) output: Output,
@@ -61,6 +69,7 @@ pub(crate) struct SayukiState {
     pointer: PointerHandle<Self>,
 
     pointer_location: Point<f64, Logical>,
+    cursor_image: CursorImageStatus,
     next_window_index: i32,
     start_time: Instant,
     pub(crate) running: bool,
@@ -70,6 +79,7 @@ impl SayukiState {
     pub(crate) fn new(
         display: &Display<Self>,
         backend: WinitGraphicsBackend<GlesRenderer>,
+        config: SayukiConfig,
     ) -> Result<Self, Box<dyn Error>> {
         let display_handle = display.handle();
 
@@ -80,8 +90,14 @@ impl SayukiState {
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
-        let keyboard = seat.add_keyboard(Default::default(), 500, 25)?;
+        let keyboard = seat.add_keyboard(
+            config.keyboard.xkb_config(),
+            config.keyboard.repeat_delay,
+            config.keyboard.repeat_rate,
+        )?;
         let pointer = seat.add_pointer();
+        let keybindings = KeybindingRegistry::from_configs(&config.keybindings)
+            .map_err(|message| io::Error::new(ErrorKind::InvalidData, message))?;
 
         let output = create_output(&display_handle, backend.window_size());
         let mut space = Space::default();
@@ -96,13 +112,15 @@ impl SayukiState {
             space,
             popups: PopupManager::default(),
             windows: Vec::new(),
-            key_daemon: KeyDaemon::default(),
+            action_runner: ActionRunner::default(),
+            keybindings,
             backend,
             output,
             _seat: seat,
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
+            cursor_image: CursorImageStatus::default_named(),
             next_window_index: 0,
             start_time: Instant::now(),
             running: true,
@@ -110,7 +128,11 @@ impl SayukiState {
     }
 
     pub(crate) fn set_wayland_display(&mut self, wayland_display: String) {
-        self.key_daemon.set_wayland_display(wayland_display);
+        self.action_runner.set_wayland_display(wayland_display);
+    }
+
+    pub(crate) fn set_cursor_image(&mut self, image: CursorImageStatus) {
+        self.cursor_image = image;
     }
 
     pub(crate) fn handle_winit_event(&mut self, event: WinitEvent) {
@@ -154,7 +176,7 @@ impl SayukiState {
         let keycode = event.key_code();
         let key_state = event.state();
         let keyboard = self.keyboard.clone();
-        let action = keyboard.input::<KeyAction, _>(
+        let action = keyboard.input::<CompositorAction, _>(
             self,
             keycode,
             key_state,
@@ -162,13 +184,29 @@ impl SayukiState {
             event.time_msec(),
             move |state, modifiers, handle| {
                 state
-                    .key_daemon
+                    .keybindings
                     .filter_key(keycode, key_state, modifiers, handle.modified_sym())
             },
         );
 
         if let Some(action) = action {
-            self.key_daemon.run_action(action);
+            self.run_action(action);
+        }
+    }
+
+    fn run_action(&mut self, action: CompositorAction) {
+        match action {
+            CompositorAction::None => {}
+            CompositorAction::Quit => {
+                info!("quit action requested");
+                self.running = false;
+            }
+            CompositorAction::Spawn(command) => self.action_runner.spawn(&command),
+            CompositorAction::BeginMove => self.begin_move_focused_window(),
+            CompositorAction::BeginResize(edges) => self.begin_resize_focused_window(edges),
+            CompositorAction::SwitchWorkspace(workspace) => {
+                debug!(workspace, "workspace switching is not implemented yet");
+            }
         }
     }
 
@@ -365,7 +403,82 @@ impl SayukiState {
 
     pub(crate) fn refresh_space(&mut self) {
         self.space.refresh();
-        self.key_daemon.reap_children();
+        self.action_runner.reap_children();
+    }
+
+    fn begin_move_focused_window(&mut self) {
+        let Some(window) = self.focused_window() else {
+            debug!("move action ignored because no window is focused");
+            return;
+        };
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            debug!("move action ignored because the focused window is not mapped");
+            return;
+        };
+
+        let start_data = self.pointer_grab_start_data();
+        let pointer = self.pointer.clone();
+        pointer.set_grab(
+            self,
+            PointerMoveSurfaceGrab {
+                start_data,
+                window,
+                initial_window_location,
+            },
+            SERIAL_COUNTER.next_serial(),
+            Focus::Clear,
+        );
+    }
+
+    fn begin_resize_focused_window(&mut self, edges: ResizeEdge) {
+        if edges.is_empty() {
+            debug!("resize action ignored because no resize edge was selected");
+            return;
+        }
+
+        let Some(window) = self.focused_window() else {
+            debug!("resize action ignored because no window is focused");
+            return;
+        };
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            debug!("resize action ignored because the focused window is not mapped");
+            return;
+        };
+
+        let mut initial_window_size = window.geometry().size;
+        if initial_window_size.w <= 0 || initial_window_size.h <= 0 {
+            initial_window_size = (100, 100).into();
+        }
+
+        let start_data = self.pointer_grab_start_data();
+        let pointer = self.pointer.clone();
+        pointer.set_grab(
+            self,
+            PointerResizeSurfaceGrab {
+                start_data,
+                window,
+                edges,
+                initial_window_location,
+                initial_window_size,
+                last_window_size: initial_window_size,
+            },
+            SERIAL_COUNTER.next_serial(),
+            Focus::Clear,
+        );
+    }
+
+    fn focused_window(&self) -> Option<Window> {
+        self.keyboard
+            .current_focus()
+            .and_then(|surface| self.window_for_surface(&surface))
+    }
+
+    fn pointer_grab_start_data(&self) -> PointerGrabStartData<Self> {
+        PointerGrabStartData {
+            focus: self.surface_under(self.pointer_location),
+            button: 0,
+            location: self.pointer_location,
+        }
     }
 
     pub(crate) fn render(&mut self) -> Result<(), Box<dyn Error>> {
@@ -378,9 +491,22 @@ impl SayukiState {
         let logical_damage = Rectangle::from_size(size.to_logical(1));
         {
             let (renderer, mut framebuffer) = self.backend.bind()?;
-            let elements =
+            let mut elements =
                 self.space
                     .render_elements_for_region(renderer, &logical_damage, 1.0, 1.0);
+            if let CursorImageStatus::Surface(surface) = &self.cursor_image {
+                let hotspot = cursor_hotspot(surface).to_f64();
+                let cursor_location: Point<i32, Physical> =
+                    (self.pointer_location - hotspot).to_physical_precise_round(1.0);
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    surface,
+                    cursor_location,
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
             let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
             frame.clear(BACKGROUND, &[damage])?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
@@ -428,7 +554,23 @@ impl SayukiState {
         for window in self.space.elements() {
             window.send_frame(&self.output, time, Some(Duration::ZERO), |_, _| None);
         }
+
+        if let CursorImageStatus::Surface(surface) = &self.cursor_image {
+            send_frames_surface_tree(surface, &self.output, time, Some(Duration::ZERO), |_, _| {
+                Some(self.output.clone())
+            });
+        }
     }
+}
+
+fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<CursorImageSurfaceData>()
+            .and_then(|attributes| attributes.lock().ok().map(|attributes| attributes.hotspot))
+            .unwrap_or_else(|| (0, 0).into())
+    })
 }
 
 fn surface_has_buffer(surface: &WlSurface) -> bool {

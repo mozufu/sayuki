@@ -274,8 +274,9 @@ impl SeatHandler for SayukiState {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        self.set_cursor_image(image);
     }
 }
 

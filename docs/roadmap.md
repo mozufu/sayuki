@@ -47,19 +47,21 @@ Status: complete in `crates/sayuki-compositor`.
 
 Make the compositor comfortable enough for daily development testing.
 
-Status: in progress. The nested compositor already forwards normal keyboard and
-pointer input, and has a first hard-coded compositor shortcut.
+Status: complete in `crates/sayuki-compositor`. The nested compositor forwards
+normal keyboard and pointer input, supports configurable keyboard settings and
+keybindings, runs compositor actions, and has a workspace action placeholder for
+Milestone 5.
 
 - [x] track modifiers through Smithay's keyboard input path
 - [x] add a first compositor action: `Alt+Enter` spawns `ghostty`
 - [x] suppress compositor-handled key presses so clients do not also receive them
 - [x] support pointer motion, buttons, and axis events
-- [ ] load a configurable xkb keymap
-- [ ] replace the hard-coded key daemon with an action/keybinding registry
-- [ ] define compositor actions such as quit, spawn command, move/resize, and
+- [x] load a configurable xkb keymap
+- [x] replace the hard-coded key daemon with an action/keybinding registry
+- [x] define compositor actions such as quit, spawn command, move/resize, and
   workspace switching
-- [ ] add configurable keybindings
-- [ ] support client-provided cursor images
+- [x] add configurable keybindings
+- [x] support client-provided cursor images
 
 ### 4. Real hardware backend
 

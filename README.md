@@ -50,6 +50,23 @@ cargo run -p sayuki-compositor
 The compositor prints the selected Wayland socket. Start test clients with that
 socket name, for example `WAYLAND_DISPLAY=wayland-1 <client>`.
 
+Pass `--config <path>` to load input settings and keybindings:
+
+```toml
+[keyboard]
+layout = "us"
+options = "compose:ralt"
+
+[[keybindings]]
+keys = "Alt+Enter"
+action = "spawn"
+command = ["ghostty"]
+
+[[keybindings]]
+keys = "Alt+Shift+Q"
+action = "quit"
+```
+
 ## Workspace
 
 ```text

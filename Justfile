@@ -38,9 +38,12 @@ fmt-check:
 flake-check:
     nix flake check
 
-# Run the nested compositor.
-run *args:
+# Run the nested compositor for interactive/manual testing.
+test-compositor *args:
     cargo run -p {{compositor}} -- {{args}}
+
+# Backwards-compatible shorthand for manual compositor testing.
+alias run := test-compositor
 
 # Remove build artifacts.
 clean:

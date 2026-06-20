@@ -11,11 +11,15 @@ use smithay::{
 };
 use tracing::{debug, error, info};
 
-use crate::{cli::Args, logging::init_tracing, state::SayukiState, wayland::ClientState};
+use crate::{
+    cli::Args, config::SayukiConfig, logging::init_tracing, state::SayukiState,
+    wayland::ClientState,
+};
 
 mod cli;
+mod config;
 mod grabs;
-mod key_daemon;
+mod input;
 mod logging;
 mod output;
 mod state;
@@ -27,11 +31,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
     let args = Args::parse();
+    let config = SayukiConfig::load(args.config.as_deref())?;
     let mut event_loop = EventLoop::<SayukiState>::try_new()?;
     let mut display = Display::<SayukiState>::new()?;
 
     let (backend, winit_event_loop) = winit::init::<GlesRenderer>()?;
-    let mut state = SayukiState::new(&display, backend)?;
+    let mut state = SayukiState::new(&display, backend, config)?;
 
     let socket_source = match args.socket.as_deref() {
         Some(socket_name) => ListeningSocketSource::with_name(socket_name)?,
