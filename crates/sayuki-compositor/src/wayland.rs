@@ -198,9 +198,8 @@ impl XdgShellHandler for SayukiState {
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        if let Some(window) = self.window_for_toplevel_surface(surface.wl_surface())
-            && let Some(output_geometry) = self.space.output_geometry(&self.output)
-        {
+        if let Some(window) = self.window_for_toplevel_surface(surface.wl_surface()) {
+            let output_geometry = self.primary_output_geometry();
             surface.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Maximized);
                 state.size = Some(output_geometry.size);
@@ -223,12 +222,11 @@ impl XdgShellHandler for SayukiState {
         surface: ToplevelSurface,
         _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
-        if let Some(output_geometry) = self.space.output_geometry(&self.output) {
-            surface.with_pending_state(|state| {
-                state.states.set(xdg_toplevel::State::Fullscreen);
-                state.size = Some(output_geometry.size);
-            });
-        }
+        let output_geometry = self.primary_output_geometry();
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.size = Some(output_geometry.size);
+        });
         surface.send_pending_configure();
     }
 

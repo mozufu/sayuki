@@ -3,19 +3,21 @@ use std::{error::Error, sync::Arc, time::Duration};
 use calloop::EventLoop;
 use clap::Parser;
 use smithay::{
-    backend::{renderer::gles::GlesRenderer, winit},
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    reexports::wayland_server::Display,
-    wayland::socket::ListeningSocketSource,
+    delegate_xdg_shell, reexports::wayland_server::Display, wayland::socket::ListeningSocketSource,
 };
 use tracing::{debug, error, info};
 
 use crate::{
-    cli::Args, config::SayukiConfig, logging::init_tracing, state::SayukiState,
+    backend::BackendState,
+    cli::{Args, BackendKind},
+    config::SayukiConfig,
+    logging::init_tracing,
+    state::SayukiState,
     wayland::ClientState,
 };
 
+mod backend;
 mod cli;
 mod config;
 mod grabs;
@@ -35,20 +37,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut event_loop = EventLoop::<SayukiState>::try_new()?;
     let mut display = Display::<SayukiState>::new()?;
 
-    let (backend, winit_event_loop) = winit::init::<GlesRenderer>()?;
-    let mut state = SayukiState::new(&display, backend, config)?;
+    let loop_handle = event_loop.handle();
+    let display_handle = display.handle();
+    let backend = match args.backend {
+        BackendKind::Nested => {
+            let (backend, winit_event_loop) = backend::nested::init(&display_handle)?;
+            loop_handle.insert_source(winit_event_loop, |event, _, state| {
+                state.handle_winit_event(event);
+            })?;
+            BackendState::Nested(backend)
+        }
+        BackendKind::Udev => BackendState::Udev(backend::udev::NativeBackend::init(
+            &display_handle,
+            &loop_handle,
+        )?),
+    };
+    let mut state = SayukiState::new(&display, config, backend)?;
 
     let socket_source = match args.socket.as_deref() {
         Some(socket_name) => ListeningSocketSource::with_name(socket_name)?,
         None => ListeningSocketSource::new_auto()?,
     };
     let socket_name = socket_source.socket_name().to_string_lossy().into_owned();
-
-    let loop_handle = event_loop.handle();
-
-    loop_handle.insert_source(winit_event_loop, |event, _, state| {
-        state.handle_winit_event(event);
-    })?;
 
     let mut client_display_handle = display.handle();
     loop_handle.insert_source(socket_source, move |client_stream, _, _state| {

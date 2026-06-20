@@ -4,19 +4,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+use calloop::LoopHandle;
 use smithay::{
     backend::{
+        drm::{DrmEvent, DrmEventMetadata as EventMetadata},
         input::{
             AbsolutePositionEvent, Axis, ButtonState, Device, Event as InputBackendEvent,
-            InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+            InputBackend, InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+            PointerMotionEvent,
         },
+        libinput::LibinputInputBackend,
         renderer::{
             Color32F, Frame, Renderer,
             element::{Kind, surface::render_elements_from_surface_tree},
-            gles::GlesRenderer,
             utils::{draw_render_elements, with_renderer_surface_state},
         },
-        winit::{WinitEvent, WinitGraphicsBackend, WinitInput},
+        session::Event as SessionEvent,
+        udev::UdevEvent,
+        winit::WinitEvent,
     },
     desktop::{PopupManager, Space, Window, WindowSurfaceType, utils::send_frames_surface_tree},
     input::{
@@ -28,7 +33,9 @@ use smithay::{
         },
     },
     output::Output,
-    reexports::wayland_server::{Display, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::{
+        Display, DisplayHandle, backend::GlobalId, protocol::wl_surface::WlSurface,
+    },
     utils::{IsAlive, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorState, with_states},
@@ -40,10 +47,10 @@ use smithay::{
 use tracing::{debug, info};
 
 use crate::{
+    backend::BackendState,
     config::SayukiConfig,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
-    output::{configure_output, create_output},
 };
 
 const BACKGROUND: Color32F = Color32F::new(0.07, 0.08, 0.11, 1.0);
@@ -62,8 +69,9 @@ pub(crate) struct SayukiState {
     action_runner: ActionRunner,
     keybindings: KeybindingRegistry,
 
-    backend: WinitGraphicsBackend<GlesRenderer>,
-    pub(crate) output: Output,
+    display_handle: DisplayHandle,
+    backend: BackendState,
+    pending_output_global_removals: Vec<(GlobalId, Instant)>,
     _seat: Seat<Self>,
     keyboard: KeyboardHandle<Self>,
     pointer: PointerHandle<Self>,
@@ -78,8 +86,8 @@ pub(crate) struct SayukiState {
 impl SayukiState {
     pub(crate) fn new(
         display: &Display<Self>,
-        backend: WinitGraphicsBackend<GlesRenderer>,
         config: SayukiConfig,
+        backend: BackendState,
     ) -> Result<Self, Box<dyn Error>> {
         let display_handle = display.handle();
 
@@ -99,9 +107,10 @@ impl SayukiState {
         let keybindings = KeybindingRegistry::from_configs(&config.keybindings)
             .map_err(|message| io::Error::new(ErrorKind::InvalidData, message))?;
 
-        let output = create_output(&display_handle, backend.window_size());
         let mut space = Space::default();
-        space.map_output(&output, (0, 0));
+        backend.for_each_output(|output| {
+            space.map_output(output, output.current_location());
+        });
 
         Ok(Self {
             compositor_state,
@@ -114,8 +123,9 @@ impl SayukiState {
             windows: Vec::new(),
             action_runner: ActionRunner::default(),
             keybindings,
+            display_handle,
             backend,
-            output,
+            pending_output_global_removals: Vec::new(),
             _seat: seat,
             keyboard,
             pointer,
@@ -146,19 +156,25 @@ impl SayukiState {
             }
             WinitEvent::Resized { size, scale_factor } => {
                 debug!(?size, scale_factor, "nested window resized");
-                self.configure_output(size);
+                self.configure_nested_output(size);
             }
             WinitEvent::Input(event) => self.handle_input(event),
             WinitEvent::Redraw => {}
         }
     }
 
-    fn handle_input(&mut self, event: InputEvent<WinitInput>) {
+    pub(crate) fn handle_input<B>(&mut self, event: InputEvent<B>)
+    where
+        B: InputBackend,
+    {
         match event {
-            InputEvent::Keyboard { event } => self.forward_keyboard_event(event),
-            InputEvent::PointerMotionAbsolute { event } => self.forward_pointer_motion(event),
-            InputEvent::PointerButton { event } => self.forward_pointer_button(event),
-            InputEvent::PointerAxis { event } => self.forward_pointer_axis(event),
+            InputEvent::Keyboard { event } => self.forward_keyboard_event::<B>(event),
+            InputEvent::PointerMotion { event } => self.forward_pointer_relative_motion::<B>(event),
+            InputEvent::PointerMotionAbsolute { event } => {
+                self.forward_pointer_absolute_motion::<B>(event);
+            }
+            InputEvent::PointerButton { event } => self.forward_pointer_button::<B>(event),
+            InputEvent::PointerAxis { event } => self.forward_pointer_axis::<B>(event),
             InputEvent::DeviceAdded { device } => {
                 debug!(name = device.name(), "input device added")
             }
@@ -169,10 +185,10 @@ impl SayukiState {
         }
     }
 
-    fn forward_keyboard_event(
-        &mut self,
-        event: <WinitInput as smithay::backend::input::InputBackend>::KeyboardKeyEvent,
-    ) {
+    fn forward_keyboard_event<B>(&mut self, event: B::KeyboardKeyEvent)
+    where
+        B: InputBackend,
+    {
         let keycode = event.key_code();
         let key_state = event.state();
         let keyboard = self.keyboard.clone();
@@ -188,7 +204,6 @@ impl SayukiState {
                     .filter_key(keycode, key_state, modifiers, handle.modified_sym())
             },
         );
-
         if let Some(action) = action {
             self.run_action(action);
         }
@@ -210,14 +225,30 @@ impl SayukiState {
         }
     }
 
-    fn forward_pointer_motion(
-        &mut self,
-        event: <WinitInput as smithay::backend::input::InputBackend>::PointerMotionAbsoluteEvent,
-    ) {
-        let logical_size = self.logical_output_size();
-        let location = event.position_transformed(logical_size);
+    fn forward_pointer_relative_motion<B>(&mut self, event: B::PointerMotionEvent)
+    where
+        B: InputBackend,
+    {
+        let output_geometry = self.primary_output_geometry();
+        let location =
+            clamp_pointer_location(self.pointer_location + event.delta(), output_geometry);
         self.pointer_location = location;
+        self.forward_pointer_motion_to_clients(location, event.time_msec());
+    }
 
+    fn forward_pointer_absolute_motion<B>(&mut self, event: B::PointerMotionAbsoluteEvent)
+    where
+        B: InputBackend,
+    {
+        let output_geometry = self.primary_output_geometry();
+        let transformed_location =
+            output_geometry.loc.to_f64() + event.position_transformed(output_geometry.size);
+        let location = clamp_pointer_location(transformed_location, output_geometry);
+        self.pointer_location = location;
+        self.forward_pointer_motion_to_clients(location, event.time_msec());
+    }
+
+    fn forward_pointer_motion_to_clients(&mut self, location: Point<f64, Logical>, time: u32) {
         let pointer = self.pointer.clone();
         let under = self.surface_under(location);
         pointer.motion(
@@ -226,16 +257,16 @@ impl SayukiState {
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
-                time: event.time_msec(),
+                time,
             },
         );
         pointer.frame(self);
     }
 
-    fn forward_pointer_button(
-        &mut self,
-        event: <WinitInput as smithay::backend::input::InputBackend>::PointerButtonEvent,
-    ) {
+    fn forward_pointer_button<B>(&mut self, event: B::PointerButtonEvent)
+    where
+        B: InputBackend,
+    {
         let serial = SERIAL_COUNTER.next_serial();
         if event.state() == ButtonState::Pressed {
             self.focus_window_at(self.pointer_location, serial);
@@ -254,10 +285,10 @@ impl SayukiState {
         pointer.frame(self);
     }
 
-    fn forward_pointer_axis(
-        &mut self,
-        event: <WinitInput as smithay::backend::input::InputBackend>::PointerAxisEvent,
-    ) {
+    fn forward_pointer_axis<B>(&mut self, event: B::PointerAxisEvent)
+    where
+        B: InputBackend,
+    {
         let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
 
         for axis in [Axis::Horizontal, Axis::Vertical] {
@@ -275,16 +306,22 @@ impl SayukiState {
         pointer.frame(self);
     }
 
-    fn configure_output(&mut self, size: Size<i32, Physical>) {
-        configure_output(&self.output, size);
-        self.space.map_output(&self.output, (0, 0));
+    fn configure_nested_output(&mut self, size: Size<i32, Physical>) {
+        let BackendState::Nested(backend) = &mut self.backend else {
+            debug!("nested output configure ignored for non-nested backend");
+            return;
+        };
+
+        backend.configure_output(size);
+        let output = backend.output().clone();
+        self.space.map_output(&output, output.current_location());
     }
 
-    fn logical_output_size(&self) -> Size<i32, Logical> {
-        self.output
-            .current_mode()
-            .map(|mode| mode.size.to_logical(1))
-            .unwrap_or_else(|| self.backend.window_size().to_logical(1))
+    pub(crate) fn primary_output_geometry(&self) -> Rectangle<i32, Logical> {
+        self.backend
+            .primary_output()
+            .and_then(|output| self.space.output_geometry(output))
+            .unwrap_or_else(|| Rectangle::new((0, 0).into(), (800, 600).into()))
     }
 
     pub(crate) fn add_toplevel(&mut self, surface: ToplevelSurface) {
@@ -300,10 +337,7 @@ impl SayukiState {
     }
 
     pub(crate) fn place_window(&mut self, window: Window, activate: bool) {
-        let output_geometry = self
-            .space
-            .output_geometry(&self.output)
-            .unwrap_or_else(|| Rectangle::from_size(self.logical_output_size()));
+        let output_geometry = self.primary_output_geometry();
 
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
@@ -350,11 +384,7 @@ impl SayukiState {
             return;
         }
 
-        let bounds = self
-            .space
-            .output_geometry(&self.output)
-            .map(|geometry| geometry.size)
-            .unwrap_or_else(|| self.logical_output_size());
+        let bounds = self.primary_output_geometry().size;
         toplevel.with_pending_state(|state| {
             state.bounds = Some(bounds);
         });
@@ -404,6 +434,98 @@ impl SayukiState {
     pub(crate) fn refresh_space(&mut self) {
         self.space.refresh();
         self.action_runner.reap_children();
+
+        let now = Instant::now();
+        let mut index = 0;
+        while index < self.pending_output_global_removals.len() {
+            if now >= self.pending_output_global_removals[index].1 {
+                let (global_id, _) = self.pending_output_global_removals.remove(index);
+                self.display_handle.remove_global::<Self>(global_id);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    pub(crate) fn handle_libinput_event(&mut self, event: InputEvent<LibinputInputBackend>) {
+        let should_forward =
+            matches!(&self.backend, BackendState::Udev(backend) if backend.is_active());
+        if should_forward {
+            self.handle_input(event);
+        } else {
+            debug!("libinput event ignored while native backend is inactive");
+        }
+    }
+
+    pub(crate) fn handle_session_event(
+        &mut self,
+        event: SessionEvent,
+    ) -> Result<(), Box<dyn Error>> {
+        let BackendState::Udev(backend) = &mut self.backend else {
+            debug!("session event ignored for non-udev backend");
+            return Ok(());
+        };
+
+        backend.handle_session_event(
+            event,
+            &self.display_handle,
+            &mut self.space,
+            &mut self.pending_output_global_removals,
+        )
+    }
+
+    pub(crate) fn handle_udev_event(
+        &mut self,
+        event: UdevEvent,
+        display_handle: &DisplayHandle,
+        loop_handle: &LoopHandle<Self>,
+    ) -> Result<(), Box<dyn Error>> {
+        let BackendState::Udev(backend) = &mut self.backend else {
+            debug!("udev event ignored for non-udev backend");
+            return Ok(());
+        };
+
+        backend.handle_udev_event(
+            event,
+            display_handle,
+            loop_handle,
+            &mut self.space,
+            &mut self.pending_output_global_removals,
+        )
+    }
+
+    pub(crate) fn handle_drm_event(
+        &mut self,
+        device_id: u64,
+        event: DrmEvent,
+        metadata: Option<EventMetadata>,
+        loop_handle: &LoopHandle<Self>,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = {
+            let BackendState::Udev(backend) = &mut self.backend else {
+                debug!("DRM event ignored for non-udev backend");
+                return Ok(());
+            };
+
+            backend.handle_drm_event(
+                device_id,
+                event,
+                metadata,
+                &self.display_handle,
+                loop_handle,
+                &mut self.space,
+                &mut self.pending_output_global_removals,
+            )?
+        };
+
+        if let Some(output) = output {
+            self.send_frame_callbacks_for_output(
+                &output,
+                Duration::from_millis(u64::from(self.frame_time())),
+            );
+        }
+
+        Ok(())
     }
 
     fn begin_move_focused_window(&mut self) {
@@ -482,38 +604,51 @@ impl SayukiState {
     }
 
     pub(crate) fn render(&mut self) -> Result<(), Box<dyn Error>> {
-        let size = self.backend.window_size();
-        if size.w == 0 || size.h == 0 {
-            return Ok(());
-        }
+        match &mut self.backend {
+            BackendState::Nested(backend) => {
+                let size = backend.window_size();
+                if size.w == 0 || size.h == 0 {
+                    return Ok(());
+                }
 
-        let damage = Rectangle::from_size(size);
-        let logical_damage = Rectangle::from_size(size.to_logical(1));
-        {
-            let (renderer, mut framebuffer) = self.backend.bind()?;
-            let mut elements =
-                self.space
-                    .render_elements_for_region(renderer, &logical_damage, 1.0, 1.0);
-            if let CursorImageStatus::Surface(surface) = &self.cursor_image {
-                let hotspot = cursor_hotspot(surface).to_f64();
-                let cursor_location: Point<i32, Physical> =
-                    (self.pointer_location - hotspot).to_physical_precise_round(1.0);
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    surface,
-                    cursor_location,
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                ));
+                let damage = Rectangle::from_size(size);
+                let logical_damage = Rectangle::from_size(size.to_logical(1));
+                {
+                    let (renderer, mut framebuffer) = backend.graphics_mut().bind()?;
+                    let mut elements =
+                        self.space
+                            .render_elements_for_region(renderer, &logical_damage, 1.0, 1.0);
+                    if let CursorImageStatus::Surface(surface) = &self.cursor_image {
+                        let hotspot = cursor_hotspot(surface).to_f64();
+                        let cursor_location: Point<i32, Physical> =
+                            (self.pointer_location - hotspot).to_physical_precise_round(1.0);
+                        elements.extend(render_elements_from_surface_tree(
+                            renderer,
+                            surface,
+                            cursor_location,
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        ));
+                    }
+                    let mut frame =
+                        renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
+                    frame.clear(BACKGROUND, &[damage])?;
+                    draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
+                    let _sync_point = frame.finish()?;
+                }
+                backend.graphics_mut().submit(Some(&[damage]))?;
+                self.send_frame_callbacks_for_all_outputs();
             }
-            let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
-            frame.clear(BACKGROUND, &[damage])?;
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
-            let _sync_point = frame.finish()?;
+            BackendState::Udev(backend) => {
+                backend.render(
+                    &self.space,
+                    &self.cursor_image,
+                    self.pointer_location,
+                    BACKGROUND,
+                )?;
+            }
         }
-        self.backend.submit(Some(&[damage]))?;
-        self.send_frame_callbacks();
 
         Ok(())
     }
@@ -549,21 +684,77 @@ impl SayukiState {
         }
     }
 
-    fn send_frame_callbacks(&self) {
-        let time = Duration::from_millis(u64::from(self.frame_time()));
+    fn send_frame_callbacks_for_output(&self, output: &Output, time: Duration) {
         for window in self.space.elements() {
-            window.send_frame(&self.output, time, Some(Duration::ZERO), |_, _| None);
+            let outputs = self.space.outputs_for_element(window);
+            if outputs.is_empty() {
+                if self.backend.primary_output() == Some(output) {
+                    window.send_frame(output, time, Some(Duration::ZERO), |_, _| None);
+                }
+                continue;
+            }
+
+            for candidate in outputs {
+                if &candidate == output {
+                    window.send_frame(&candidate, time, Some(Duration::ZERO), |_, _| None);
+                }
+            }
         }
 
-        if let CursorImageStatus::Surface(surface) = &self.cursor_image {
-            send_frames_surface_tree(surface, &self.output, time, Some(Duration::ZERO), |_, _| {
-                Some(self.output.clone())
+        if let Some(cursor_output) = self.cursor_frame_output()
+            && cursor_output == *output
+            && let CursorImageStatus::Surface(surface) = &self.cursor_image
+        {
+            send_frames_surface_tree(surface, output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
             });
         }
     }
+
+    fn send_frame_callbacks_for_all_outputs(&self) {
+        let time = Duration::from_millis(u64::from(self.frame_time()));
+        for window in self.space.elements() {
+            let outputs = self.space.outputs_for_element(window);
+            if outputs.is_empty() {
+                if let Some(output) = self.backend.primary_output() {
+                    window.send_frame(output, time, Some(Duration::ZERO), |_, _| None);
+                }
+                continue;
+            }
+
+            for output in outputs {
+                window.send_frame(&output, time, Some(Duration::ZERO), |_, _| None);
+            }
+        }
+
+        if let Some(output) = self.cursor_frame_output()
+            && let CursorImageStatus::Surface(surface) = &self.cursor_image
+        {
+            send_frames_surface_tree(surface, &output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
+
+    fn cursor_frame_output(&self) -> Option<Output> {
+        let mut cursor_output = None;
+        self.backend.for_each_output(|output| {
+            if cursor_output.is_none()
+                && self
+                    .space
+                    .output_geometry(output)
+                    .map(|geometry| geometry.to_f64().contains(self.pointer_location))
+                    .unwrap_or(false)
+            {
+                cursor_output = Some(output.clone());
+            }
+        });
+
+        cursor_output.or_else(|| self.backend.primary_output().cloned())
+    }
 }
 
-fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
+pub(crate) fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
     with_states(surface, |states| {
         states
             .data_map
@@ -573,6 +764,46 @@ fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
     })
 }
 
+fn clamp_pointer_location(
+    location: Point<f64, Logical>,
+    bounds: Rectangle<i32, Logical>,
+) -> Point<f64, Logical> {
+    let min_x = f64::from(bounds.loc.x);
+    let min_y = f64::from(bounds.loc.y);
+    let max_x = f64::from(bounds.loc.x + bounds.size.w.max(1) - 1);
+    let max_y = f64::from(bounds.loc.y + bounds.size.h.max(1) - 1);
+
+    (
+        location.x.clamp(min_x, max_x),
+        location.y.clamp(min_y, max_y),
+    )
+        .into()
+}
+
 fn surface_has_buffer(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::utils::{Logical, Point, Rectangle};
+
+    use super::clamp_pointer_location;
+
+    #[test]
+    fn relative_pointer_motion_clamps_to_output() {
+        let bounds = Rectangle::<i32, Logical>::new((10, 20).into(), (100, 50).into());
+        let start: Point<f64, Logical> = (30.0, 40.0).into();
+        let negative_delta: Point<f64, Logical> = (-50.0, -50.0).into();
+        let positive_delta: Point<f64, Logical> = (500.0, 500.0).into();
+
+        assert_eq!(
+            clamp_pointer_location(start + negative_delta, bounds),
+            (10.0, 20.0).into()
+        );
+        assert_eq!(
+            clamp_pointer_location(start + positive_delta, bounds),
+            (109.0, 69.0).into()
+        );
+    }
 }

@@ -14,17 +14,26 @@ calloop = "0.14"
 clap = { version = "4.6", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 smithay = { version = "0.7", default-features = false, features = [
+  "backend_drm",
+  "backend_gbm",
+  "backend_libinput",
+  "backend_session_libseat",
+  "backend_udev",
   "backend_winit",
   "desktop",
+  "renderer_gl",
+  "renderer_multi",
+  "renderer_pixman",
   "wayland_frontend",
 ] }
+smithay-drm-extras = "0.1"
 snafu = "0.9"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"

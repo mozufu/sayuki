@@ -65,16 +65,18 @@ Milestone 5.
 
 ### 4. Real hardware backend
 
+Status: complete in crates/sayuki-compositor
+
 After the nested backend is usable, add the native backend for running from a
 TTY. Shortcut: port the shape of Smithay `anvil`'s udev/DRM/libinput backend
 first, then abstract only the parts Sayuki actually needs to differ.
 
-- discover DRM devices through udev
-- initialize GBM/EGL/GLES rendering
-- consume libinput events
-- integrate session handling through libseat
-- support output hotplug and modesetting
-- handle VT switch pause/resume
+- [x] discover DRM devices through udev
+- [x] initialize GBM/EGL/GLES rendering
+- [x] consume libinput events
+- [x] integrate session handling through libseat
+- [x] support output hotplug and modesetting
+- [x] handle VT switch pause/resume
 
 ### 5. Window manager model
 

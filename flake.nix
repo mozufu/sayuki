@@ -38,11 +38,12 @@
 
         waylandBuildInputs = with pkgs; [
           libGL
-          libdisplay-info
+          libdisplay-info_0_2
           libdrm
           libinput
           libxkbcommon
           mesa
+          libgbm
           pixman
           seatd
           udev

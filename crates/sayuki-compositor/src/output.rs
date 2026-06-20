@@ -8,7 +8,10 @@ use crate::state::SayukiState;
 
 pub(crate) const OUTPUT_REFRESH_MHZ: i32 = 60_000;
 
-pub(crate) fn create_output(display_handle: &DisplayHandle, size: Size<i32, Physical>) -> Output {
+pub(crate) fn create_nested_output(
+    display_handle: &DisplayHandle,
+    size: Size<i32, Physical>,
+) -> Output {
     let output = Output::new(
         "sayuki-nested-0".into(),
         PhysicalProperties {

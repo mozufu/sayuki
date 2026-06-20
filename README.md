@@ -4,7 +4,7 @@ Sayuki is a Rust workspace for Wayland compositor development.
 
 The repository currently has one binary crate:
 
-- `crates/sayuki-compositor`: nested Smithay/winit compositor executable.
+- `crates/sayuki-compositor`: Smithay compositor executable with nested winit and native udev/DRM backends.
 
 ## Toolchain
 
@@ -45,6 +45,13 @@ Run the nested compositor:
 
 ```sh
 cargo run -p sayuki-compositor
+```
+
+Run the native TTY backend from a real TTY with a working logind/seatd/libseat
+session:
+
+```sh
+cargo run -p sayuki-compositor -- --backend udev
 ```
 
 The compositor prints the selected Wayland socket. Start test clients with that
