@@ -80,44 +80,88 @@ first, then abstract only the parts Sayuki actually needs to differ.
 
 ### 5. Window manager model
 
-Move from "example compositor" behavior to Sayuki's own policy.
+Move from "example compositor" behavior to Sayuki's own policy. Sayuki is
+project-oriented: a workspace is a project context, not a numeric slot. It
+carries a working directory, an environment (via direnv), and a desktop session
+(apps, layout, window rules). direnv owns the environment; Sayuki owns the
+windows and session.
 
-- workspaces
-- output assignment
-- focus stack
-- floating windows
-- tiling layouts, if desired
+See `docs/milestone-5-window-manager-model.md` for the detailed spec, split into
+5a (WM core / mechanism) and 5b (project session layer / policy).
+
+5a — WM core:
+
+- workspaces with explicit per-workspace focus stacks
+- output assignment and output-aware placement
+- floating windows with persisted geometry
+
+5b — project session layer:
+
+- project context per workspace: working directory, env overlay, lifecycle hooks
+- direnv integration for spawned processes (`direnv exec`, non-interactive)
+- `.sayuki` project files plus central `[[project]]` config, with a trust gate
 - window rules
 - per-output scale and transform policy
+- tiling layouts, if desired (deferred beyond a floating-only layout)
 
 ### 6. Desktop protocols and polish
 
 Add protocols as the compositor needs them. Prefer Smithay protocol handlers and
-helpers before adding generated protocol glue directly. Prioritize protocols that
-unblock real applications in nested testing.
+helpers before adding generated protocol glue directly. Two consumers, two
+transports: a first-party shell over Sayuki IPC (milestone 7), and the existing
+Wayland ecosystem (waybar, grim, wl-clipboard, swayidle) over standard wlr/ext
+protocols. Build both.
 
+See `docs/milestone-6-desktop-protocols.md` for the detailed spec (priority
+tiers, the layer-shell work-area contract, and Smithay handler mapping).
+
+Tier 0 — shell foundation:
+
+- layer shell for panels, backgrounds, notifications, launchers, lock surfaces
 - `xdg-output`
-- `xdg-decoration`
-- layer shell for panels, backgrounds, and notifications
-- data device and clipboard validation beyond the existing basic data-device
-  plumbing
-- primary selection
-- viewporter
-- fractional scale
+
+Tier 1 — ecosystem interop:
+
+- foreign-toplevel for external taskbars
+- data device and clipboard (data-control), beyond the existing basic plumbing
+- screencopy for screenshots and screencast
+
+Tier 2 — session and security:
+
+- session lock
+- idle notify and idle inhibit
+
+Tier 3 — input completeness:
+
+- text-input/input-method (IME) and virtual keyboard
+- pointer constraints and relative pointer
+- `xdg-activation`
+
+Tier 4 — visual polish:
+
+- `xdg-decoration` (server-side default, CSD opt-in)
+- fractional scale and viewporter
 - presentation time
-- idle inhibit
-- screencopy later
-- XWayland much later
+- primary selection
+
+Far: XWayland; xdg-desktop-portal backend (screencast via PipeWire).
 
 ### 7. Configuration and IPC
 
-Make Sayuki scriptable and configurable.
+Make Sayuki scriptable and configurable. IPC is the DE control plane: one
+`Action` seam shared by keybindings and IPC, a shared `sayuki-ipc` crate, and a
+`sayukictl` client. The config file is the source of truth with hot reload; IPC
+issues ephemeral actions.
 
-- parse a config file, likely TOML at first
-- configure keybindings, outputs, and window rules
-- support live reload where safe
-- expose a Unix socket IPC protocol
-- add an optional `sayukictl` binary
+See `docs/milestone-7-config-and-ipc.md` for the detailed spec (wire format,
+`sayuki-ipc` type sketch, command/query/event taxonomy, hot-reload safety
+matrix).
+
+- layered config: defaults, system, user, then per-project `.sayuki`
+- configure keyboard, input, keybindings, outputs, projects, and window rules
+- live reload with atomic validate-then-swap
+- Unix socket IPC: request/reply plus a subscribable event stream
+- shared `sayuki-ipc` crate (wire types) and an optional `sayukictl` binary
 
 ## Reference-first development policy
 
