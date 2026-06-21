@@ -130,7 +130,7 @@ impl XdgShellHandler for SayukiState {
         let Some(window) = self.window_for_toplevel_surface(surface.wl_surface()) else {
             return;
         };
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(initial_window_location) = self.space().element_location(&window) else {
             return;
         };
 
@@ -173,7 +173,7 @@ impl XdgShellHandler for SayukiState {
         let Some(window) = self.window_for_toplevel_surface(surface.wl_surface()) else {
             return;
         };
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(initial_window_location) = self.space().element_location(&window) else {
             return;
         };
 
@@ -199,12 +199,13 @@ impl XdgShellHandler for SayukiState {
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for_toplevel_surface(surface.wl_surface()) {
-            let output_geometry = self.primary_output_geometry();
+            let output_geometry = self.window_output_geometry(&window);
             surface.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Maximized);
                 state.size = Some(output_geometry.size);
             });
-            self.space.map_element(window, output_geometry.loc, true);
+            self.space_mut()
+                .map_element(window, output_geometry.loc, true);
         }
         surface.send_pending_configure();
     }
@@ -222,7 +223,10 @@ impl XdgShellHandler for SayukiState {
         surface: ToplevelSurface,
         _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
-        let output_geometry = self.primary_output_geometry();
+        let output_geometry = self
+            .window_for_toplevel_surface(surface.wl_surface())
+            .map(|window| self.window_output_geometry(&window))
+            .unwrap_or_else(|| self.primary_output_geometry());
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
             state.size = Some(output_geometry.size);

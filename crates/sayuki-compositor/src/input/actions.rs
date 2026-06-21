@@ -1,13 +1,38 @@
-use crate::{config::BindingActionConfig, grabs::ResizeEdge};
+use crate::{
+    config::BindingActionConfig,
+    grabs::ResizeEdge,
+    wm::swap::{Direction, SwapTarget},
+};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CompositorAction {
     None,
     Quit,
     Spawn(Vec<String>),
     BeginMove,
     BeginResize(ResizeEdge),
+    /// Switch the active canvas to the workspace numbered `workspace`.
     SwitchWorkspace(u8),
+    /// Move the focused window to the workspace numbered `workspace`.
+    MoveToWorkspace(u8),
+    /// Pan the viewport(s) by a logical-pixel delta.
+    PanViewport {
+        dx: i32,
+        dy: i32,
+    },
+    /// Zoom the viewport(s) by a multiplicative factor about the center.
+    ZoomViewport(f64),
+    /// Toggle the fit-all overview on the focused output.
+    ToggleOverview,
+    /// Toggle the persistent minimap on the focused output.
+    ToggleMinimap,
+    /// Pin/unpin the focused window to its output's viewport.
+    TogglePin,
+    /// Swap the focused window with another by direction or MRU order.
+    SwapWindow(SwapTarget),
+    /// Cycle focus through the active canvas's MRU stack.
+    FocusNext,
+    FocusPrev,
 }
 
 impl CompositorAction {
@@ -22,6 +47,21 @@ impl CompositorAction {
             BindingActionConfig::SwitchWorkspace { workspace } => {
                 Ok(Self::SwitchWorkspace(*workspace))
             }
+            BindingActionConfig::MoveToWorkspace { workspace } => {
+                Ok(Self::MoveToWorkspace(*workspace))
+            }
+            BindingActionConfig::PanViewport { dx, dy } => {
+                Ok(Self::PanViewport { dx: *dx, dy: *dy })
+            }
+            BindingActionConfig::ZoomViewport { factor } => Ok(Self::ZoomViewport(*factor)),
+            BindingActionConfig::ToggleOverview => Ok(Self::ToggleOverview),
+            BindingActionConfig::ToggleMinimap => Ok(Self::ToggleMinimap),
+            BindingActionConfig::TogglePin => Ok(Self::TogglePin),
+            BindingActionConfig::SwapWindow { target } => {
+                parse_swap_target(target).map(Self::SwapWindow)
+            }
+            BindingActionConfig::FocusNext => Ok(Self::FocusNext),
+            BindingActionConfig::FocusPrev => Ok(Self::FocusPrev),
         }
     }
 }
@@ -46,4 +86,23 @@ fn parse_resize_edges(edges: &str) -> Result<ResizeEdge, String> {
     };
 
     Ok(edge)
+}
+
+fn parse_swap_target(target: &str) -> Result<SwapTarget, String> {
+    let normalized = target.trim().to_ascii_lowercase();
+    let swap = match normalized.as_str() {
+        "left" => SwapTarget::Direction(Direction::Left),
+        "right" => SwapTarget::Direction(Direction::Right),
+        "up" => SwapTarget::Direction(Direction::Up),
+        "down" => SwapTarget::Direction(Direction::Down),
+        "next" => SwapTarget::Next,
+        "prev" | "previous" => SwapTarget::Prev,
+        _ => {
+            return Err(format!(
+                "unknown swap target `{target}`; expected one of left, right, up, down, next, prev"
+            ));
+        }
+    };
+
+    Ok(swap)
 }

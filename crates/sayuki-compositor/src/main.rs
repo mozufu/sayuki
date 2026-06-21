@@ -24,8 +24,10 @@ mod grabs;
 mod input;
 mod logging;
 mod output;
+mod render;
 mod state;
 mod wayland;
+mod wm;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 

@@ -23,18 +23,11 @@ use smithay::{
         egl::{EGLContext, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            Bind, Color32F,
-            element::{
-                Kind,
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-            },
-            gles::GlesRenderer,
+            Bind, Color32F, element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
-    desktop::{Space, Window},
-    input::pointer::CursorImageStatus,
     output::{Output, PhysicalProperties, Scale},
     reexports::{
         drm::control::{ModeTypeFlags, connector, crtc},
@@ -42,7 +35,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{DisplayHandle, backend::GlobalId},
     },
-    utils::{DeviceFd, Logical, Physical, Point, Transform},
+    utils::{DeviceFd, Logical, Point, Transform},
 };
 use smithay_drm_extras::{
     display_info,
@@ -50,7 +43,11 @@ use smithay_drm_extras::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::state::{SayukiState, cursor_hotspot};
+use crate::{
+    render::{self, CursorRender},
+    state::SayukiState,
+    wm::{Canvas, WindowManager},
+};
 
 const OUTPUT_GLOBAL_REMOVAL_DELAY: Duration = Duration::from_secs(5);
 const SUPPORTED_FORMATS: &[Fourcc] = &[
@@ -186,7 +183,7 @@ impl NativeBackend {
         event: UdevEvent,
         display_handle: &DisplayHandle,
         loop_handle: &LoopHandle<SayukiState>,
-        space: &mut Space<Window>,
+        wm: &mut WindowManager,
         pending_removals: &mut Vec<(GlobalId, Instant)>,
     ) -> Result<(), Box<dyn Error>> {
         match event {
@@ -197,13 +194,13 @@ impl NativeBackend {
                 } else {
                     self.add_device(device_id, path, display_handle, loop_handle)?
                 };
-                apply_output_updates(display_handle, space, pending_removals, updates);
+                apply_output_updates(display_handle, wm, pending_removals, updates);
             }
             UdevEvent::Changed { device_id } => {
                 let device_id = device_id_to_u64(device_id);
                 if self.devices.contains_key(&device_id) {
                     let updates = self.scan_connectors(device_id, display_handle)?;
-                    apply_output_updates(display_handle, space, pending_removals, updates);
+                    apply_output_updates(display_handle, wm, pending_removals, updates);
                 } else {
                     warn!(device_id, "udev change ignored for unknown DRM device");
                 }
@@ -213,7 +210,7 @@ impl NativeBackend {
                     device_id_to_u64(device_id),
                     display_handle,
                     loop_handle,
-                    space,
+                    wm,
                     pending_removals,
                 );
             }
@@ -226,7 +223,7 @@ impl NativeBackend {
         &mut self,
         event: SessionEvent,
         display_handle: &DisplayHandle,
-        space: &mut Space<Window>,
+        wm: &mut WindowManager,
         pending_removals: &mut Vec<(GlobalId, Instant)>,
     ) -> Result<(), Box<dyn Error>> {
         match event {
@@ -252,7 +249,7 @@ impl NativeBackend {
                 let device_ids = self.devices.keys().copied().collect::<Vec<_>>();
                 for device_id in device_ids {
                     let updates = self.scan_connectors(device_id, display_handle)?;
-                    apply_output_updates(display_handle, space, pending_removals, updates);
+                    apply_output_updates(display_handle, wm, pending_removals, updates);
                 }
             }
         }
@@ -268,7 +265,7 @@ impl NativeBackend {
         metadata: Option<EventMetadata>,
         display_handle: &DisplayHandle,
         loop_handle: &LoopHandle<SayukiState>,
-        space: &mut Space<Window>,
+        wm: &mut WindowManager,
         pending_removals: &mut Vec<(GlobalId, Instant)>,
     ) -> Result<Option<Output>, Box<dyn Error>> {
         match event {
@@ -298,13 +295,7 @@ impl NativeBackend {
             }
             DrmEvent::Error(error) => {
                 warn!(?error, device_id, "DRM device event error");
-                self.remove_device(
-                    device_id,
-                    display_handle,
-                    loop_handle,
-                    space,
-                    pending_removals,
-                );
+                self.remove_device(device_id, display_handle, loop_handle, wm, pending_removals);
                 Ok(None)
             }
         }
@@ -312,9 +303,8 @@ impl NativeBackend {
 
     pub(crate) fn render(
         &mut self,
-        space: &Space<Window>,
-        cursor_image: &CursorImageStatus,
-        pointer_location: Point<f64, Logical>,
+        canvas: &Canvas,
+        cursor: Option<CursorRender<'_>>,
         background: Color32F,
     ) -> Result<(), Box<dyn Error>> {
         if !self.active {
@@ -335,28 +325,7 @@ impl NativeBackend {
             if native_output.pending_frame {
                 continue;
             }
-            let Some(output_geometry) = space.output_geometry(&native_output.output) else {
-                continue;
-            };
-
-            let mut elements =
-                space.render_elements_for_region(renderer, &output_geometry, 1.0, 1.0);
-            if let CursorImageStatus::Surface(surface) = cursor_image
-                && output_geometry.to_f64().contains(pointer_location)
-            {
-                let hotspot = cursor_hotspot(surface).to_f64();
-                let cursor_location: Point<i32, Physical> =
-                    (pointer_location - output_geometry.loc.to_f64() - hotspot)
-                        .to_physical_precise_round(1.0);
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    surface,
-                    cursor_location,
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                ));
-            }
+            let elements = render::output_elements(renderer, canvas, &native_output.output, cursor);
 
             let render_result = native_output.drm_output.render_frame(
                 renderer,
@@ -616,7 +585,7 @@ impl NativeBackend {
         device_id: u64,
         display_handle: &DisplayHandle,
         loop_handle: &LoopHandle<SayukiState>,
-        space: &mut Space<Window>,
+        wm: &mut WindowManager,
         pending_removals: &mut Vec<(GlobalId, Instant)>,
     ) {
         let Some(device) = self.devices.remove(&device_id) else {
@@ -628,7 +597,7 @@ impl NativeBackend {
         self.output_order
             .retain(|(ordered_device_id, _)| *ordered_device_id != device_id);
         for (_, native_output) in device.outputs {
-            space.unmap_output(&native_output.output);
+            wm.unmap_output_all(&native_output.output);
             queue_global_removal(display_handle, pending_removals, native_output.global);
         }
         info!(device_id, path = ?device.path, "removed DRM device");
@@ -657,17 +626,17 @@ impl NativeBackend {
 
 fn apply_output_updates(
     display_handle: &DisplayHandle,
-    space: &mut Space<Window>,
+    wm: &mut WindowManager,
     pending_removals: &mut Vec<(GlobalId, Instant)>,
     updates: NativeOutputUpdates,
 ) {
     for (output, global) in updates.removed {
-        space.unmap_output(&output);
+        wm.unmap_output_all(&output);
         queue_global_removal(display_handle, pending_removals, global);
     }
 
     for output in updates.added {
-        space.map_output(&output, output.current_location());
+        wm.map_output_active(&output);
     }
 }
 

@@ -14,11 +14,7 @@ use smithay::{
             PointerMotionEvent,
         },
         libinput::LibinputInputBackend,
-        renderer::{
-            Color32F, Frame, Renderer,
-            element::{Kind, surface::render_elements_from_surface_tree},
-            utils::{draw_render_elements, with_renderer_surface_state},
-        },
+        renderer::{Color32F, Frame, Renderer, utils::draw_render_elements},
         session::Event as SessionEvent,
         udev::UdevEvent,
         winit::WinitEvent,
@@ -36,7 +32,7 @@ use smithay::{
     reexports::wayland_server::{
         Display, DisplayHandle, backend::GlobalId, protocol::wl_surface::WlSurface,
     },
-    utils::{IsAlive, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
+    utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorState, with_states},
         selection::data_device::DataDeviceState,
@@ -51,11 +47,13 @@ use crate::{
     config::SayukiConfig,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
+    render::{self, CursorRender},
+    wm::{WindowManager, focus::CycleDirection, viewport},
 };
 
+mod actions;
+
 const BACKGROUND: Color32F = Color32F::new(0.07, 0.08, 0.11, 1.0);
-const WINDOW_STAGGER: i32 = 32;
-const WINDOW_STAGGER_STEPS: i32 = 10;
 
 pub(crate) struct SayukiState {
     pub(crate) compositor_state: CompositorState,
@@ -63,9 +61,8 @@ pub(crate) struct SayukiState {
     pub(crate) shm_state: ShmState,
     pub(crate) data_device_state: DataDeviceState,
     pub(crate) seat_state: SeatState<Self>,
-    pub(crate) space: Space<Window>,
+    pub(crate) wm: WindowManager,
     pub(crate) popups: PopupManager,
-    pub(crate) windows: Vec<Window>,
     action_runner: ActionRunner,
     keybindings: KeybindingRegistry,
 
@@ -107,10 +104,9 @@ impl SayukiState {
         let keybindings = KeybindingRegistry::from_configs(&config.keybindings)
             .map_err(|message| io::Error::new(ErrorKind::InvalidData, message))?;
 
-        let mut space = Space::default();
-        backend.for_each_output(|output| {
-            space.map_output(output, output.current_location());
-        });
+        let mut outputs = Vec::new();
+        backend.for_each_output(|output| outputs.push(output.clone()));
+        let wm = WindowManager::new(&outputs, config.pan_couple, config.snap);
 
         Ok(Self {
             compositor_state,
@@ -118,9 +114,8 @@ impl SayukiState {
             shm_state,
             data_device_state,
             seat_state,
-            space,
+            wm,
             popups: PopupManager::default(),
-            windows: Vec::new(),
             action_runner: ActionRunner::default(),
             keybindings,
             display_handle,
@@ -135,6 +130,16 @@ impl SayukiState {
             start_time: Instant::now(),
             running: true,
         })
+    }
+
+    /// The active canvas's `Space` — the render/hit-test truth for the visible
+    /// desktop.
+    pub(crate) fn space(&self) -> &Space<Window> {
+        self.wm.active_space()
+    }
+
+    pub(crate) fn space_mut(&mut self) -> &mut Space<Window> {
+        self.wm.active_space_mut()
     }
 
     pub(crate) fn set_wayland_display(&mut self, wayland_display: String) {
@@ -219,9 +224,18 @@ impl SayukiState {
             CompositorAction::Spawn(command) => self.action_runner.spawn(&command),
             CompositorAction::BeginMove => self.begin_move_focused_window(),
             CompositorAction::BeginResize(edges) => self.begin_resize_focused_window(edges),
-            CompositorAction::SwitchWorkspace(workspace) => {
-                debug!(workspace, "workspace switching is not implemented yet");
+            CompositorAction::SwitchWorkspace(workspace) => self.switch_workspace(workspace),
+            CompositorAction::MoveToWorkspace(workspace) => {
+                self.move_focused_to_workspace(workspace)
             }
+            CompositorAction::PanViewport { dx, dy } => self.pan_viewport(Point::from((dx, dy))),
+            CompositorAction::ZoomViewport(factor) => self.zoom_viewport(factor),
+            CompositorAction::ToggleOverview => self.toggle_overview(),
+            CompositorAction::ToggleMinimap => self.toggle_minimap(),
+            CompositorAction::TogglePin => self.toggle_pin_focused(),
+            CompositorAction::SwapWindow(target) => self.swap_focused(target),
+            CompositorAction::FocusNext => self.cycle_focus(CycleDirection::Forward),
+            CompositorAction::FocusPrev => self.cycle_focus(CycleDirection::Backward),
         }
     }
 
@@ -229,9 +243,12 @@ impl SayukiState {
     where
         B: InputBackend,
     {
-        let output_geometry = self.primary_output_geometry();
-        let location =
-            clamp_pointer_location(self.pointer_location + event.delta(), output_geometry);
+        // A physical mouse delta should move the cursor the same screen distance
+        // regardless of zoom, so divide the delta by the zoom under the pointer.
+        let zoom = self.pointer_zoom();
+        let delta = event.delta();
+        let scaled = Point::from((delta.x / zoom, delta.y / zoom));
+        let location = self.clamp_pointer(self.pointer_location + scaled);
         self.pointer_location = location;
         self.forward_pointer_motion_to_clients(location, event.time_msec());
     }
@@ -240,10 +257,18 @@ impl SayukiState {
     where
         B: InputBackend,
     {
-        let output_geometry = self.primary_output_geometry();
-        let transformed_location =
-            output_geometry.loc.to_f64() + event.position_transformed(output_geometry.size);
-        let location = clamp_pointer_location(transformed_location, output_geometry);
+        let location = self
+            .backend
+            .primary_output()
+            .cloned()
+            .and_then(|output| {
+                let geometry = self.space().output_geometry(&output)?;
+                let viewport = self.wm.active().viewport(&output.name());
+                let local = event.position_transformed(geometry.size);
+                Some(viewport::to_canvas(&viewport, local))
+            })
+            .unwrap_or(self.pointer_location);
+        let location = self.clamp_pointer(location);
         self.pointer_location = location;
         self.forward_pointer_motion_to_clients(location, event.time_msec());
     }
@@ -269,7 +294,7 @@ impl SayukiState {
     {
         let serial = SERIAL_COUNTER.next_serial();
         if event.state() == ButtonState::Pressed {
-            self.focus_window_at(self.pointer_location, serial);
+            self.focus_window_at(self.pointer_location);
         }
 
         let pointer = self.pointer.clone();
@@ -314,59 +339,61 @@ impl SayukiState {
 
         backend.configure_output(size);
         let output = backend.output().clone();
-        self.space.map_output(&output, output.current_location());
+        let location = self.wm.active().viewport(&output.name()).loc;
+        self.wm.active_space_mut().map_output(&output, location);
     }
 
     pub(crate) fn primary_output_geometry(&self) -> Rectangle<i32, Logical> {
         self.backend
             .primary_output()
-            .and_then(|output| self.space.output_geometry(output))
+            .and_then(|output| self.space().output_geometry(output))
             .unwrap_or_else(|| Rectangle::new((0, 0).into(), (800, 600).into()))
     }
 
     pub(crate) fn add_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
-        self.windows.push(window);
+        self.place_window(window.clone());
+        self.focus_window(window);
     }
 
     pub(crate) fn remove_toplevel(&mut self, surface: &WlSurface) {
-        if let Some(window) = self.window_for_toplevel_surface(surface) {
-            self.space.unmap_elem(&window);
-            self.windows.retain(|known_window| known_window != &window);
+        let Some(window) = self.window_for_toplevel_surface(surface) else {
+            return;
+        };
+        if self.wm.remove_window(&window) {
+            let focus = self.wm.active().focused().cloned();
+            self.apply_focus(focus);
         }
     }
 
-    pub(crate) fn place_window(&mut self, window: Window, activate: bool) {
-        let output_geometry = self.primary_output_geometry();
+    /// Place a new window at a free, staggered spot in the viewport under the
+    /// pointer. No clamping — windows may sit anywhere on the canvas.
+    fn place_window(&mut self, window: Window) {
+        let region = self.placement_region();
+        let location = viewport::placement_location(region, self.next_window_index);
+        self.next_window_index = self.next_window_index.wrapping_add(1);
 
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
-                state.bounds = Some(output_geometry.size);
+                state.bounds = Some(region.size);
             });
         }
 
-        let step = self.next_window_index.rem_euclid(WINDOW_STAGGER_STEPS);
-        self.next_window_index = self.next_window_index.wrapping_add(1);
-        let offset = WINDOW_STAGGER * step;
-        let location = output_geometry.loc + Point::<i32, Logical>::from((offset, offset));
-
-        self.space.map_element(window, location, activate);
+        self.space_mut().map_element(window, location, false);
         self.send_pending_window_configures();
     }
 
-    pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
-        self.windows.retain(Window::alive);
+    fn placement_region(&self) -> Rectangle<i32, Logical> {
+        self.space()
+            .output_under(self.pointer_location)
+            .next()
+            .and_then(|output| self.space().output_geometry(output))
+            .unwrap_or_else(|| self.primary_output_geometry())
+    }
 
+    pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
         if let Some(window) = self.window_for_toplevel_surface(surface) {
             window.on_commit();
-
-            if surface_has_buffer(surface) {
-                if self.space.element_location(&window).is_none() {
-                    self.place_window(window, true);
-                }
-            } else {
-                self.space.unmap_elem(&window);
-            }
         } else if let Some(window) = self.window_for_surface(surface) {
             window.on_commit();
         }
@@ -384,7 +411,7 @@ impl SayukiState {
             return;
         }
 
-        let bounds = self.primary_output_geometry().size;
+        let bounds = self.window_output_geometry(&window).size;
         toplevel.with_pending_state(|state| {
             state.bounds = Some(bounds);
         });
@@ -392,35 +419,29 @@ impl SayukiState {
     }
 
     pub(crate) fn window_for_toplevel_surface(&self, surface: &WlSurface) -> Option<Window> {
-        self.windows
-            .iter()
-            .find(|window| {
-                window
-                    .toplevel()
-                    .map(|toplevel| toplevel.wl_surface() == surface)
-                    .unwrap_or(false)
-            })
-            .cloned()
+        self.wm.window_for(|window| {
+            window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface() == surface)
+                .unwrap_or(false)
+        })
     }
 
     pub(crate) fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
-        self.windows
-            .iter()
-            .find(|window| {
-                let mut found = false;
-                window.with_surfaces(|window_surface, _| {
-                    found |= window_surface == surface;
-                });
-                found
-            })
-            .cloned()
+        self.wm.window_for(|window| {
+            let mut found = false;
+            window.with_surfaces(|window_surface, _| {
+                found |= window_surface == surface;
+            });
+            found
+        })
     }
 
     pub(crate) fn surface_under(
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space
+        self.space()
             .element_under(location)
             .and_then(|(window, window_location)| {
                 window
@@ -431,8 +452,31 @@ impl SayukiState {
             })
     }
 
+    /// The geometry of the output a window currently overlaps, used for xdg
+    /// bounds and maximize/fullscreen sizing — the window's own output, not a
+    /// fixed primary.
+    pub(crate) fn window_output_geometry(&self, window: &Window) -> Rectangle<i32, Logical> {
+        self.output_for_window(window)
+            .and_then(|output| self.space().output_geometry(&output))
+            .unwrap_or_else(|| self.primary_output_geometry())
+    }
+
+    fn output_for_window(&self, window: &Window) -> Option<Output> {
+        let rect = self.space().element_geometry(window)?;
+        self.output_for_rect(rect)
+    }
+
+    fn output_for_rect(&self, rect: Rectangle<i32, Logical>) -> Option<Output> {
+        let center = rect.loc + Point::from((rect.size.w / 2, rect.size.h / 2));
+        self.space()
+            .output_under(center.to_f64())
+            .next()
+            .cloned()
+            .or_else(|| self.focused_output())
+    }
+
     pub(crate) fn refresh_space(&mut self) {
-        self.space.refresh();
+        self.space_mut().refresh();
         self.action_runner.reap_children();
 
         let now = Instant::now();
@@ -469,7 +513,7 @@ impl SayukiState {
         backend.handle_session_event(
             event,
             &self.display_handle,
-            &mut self.space,
+            &mut self.wm,
             &mut self.pending_output_global_removals,
         )
     }
@@ -489,7 +533,7 @@ impl SayukiState {
             event,
             display_handle,
             loop_handle,
-            &mut self.space,
+            &mut self.wm,
             &mut self.pending_output_global_removals,
         )
     }
@@ -513,7 +557,7 @@ impl SayukiState {
                 metadata,
                 &self.display_handle,
                 loop_handle,
-                &mut self.space,
+                &mut self.wm,
                 &mut self.pending_output_global_removals,
             )?
         };
@@ -533,7 +577,7 @@ impl SayukiState {
             debug!("move action ignored because no window is focused");
             return;
         };
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(initial_window_location) = self.space().element_location(&window) else {
             debug!("move action ignored because the focused window is not mapped");
             return;
         };
@@ -562,7 +606,7 @@ impl SayukiState {
             debug!("resize action ignored because no window is focused");
             return;
         };
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(initial_window_location) = self.space().element_location(&window) else {
             debug!("resize action ignored because the focused window is not mapped");
             return;
         };
@@ -604,6 +648,15 @@ impl SayukiState {
     }
 
     pub(crate) fn render(&mut self) -> Result<(), Box<dyn Error>> {
+        let cursor = match &self.cursor_image {
+            CursorImageStatus::Surface(surface) => Some(CursorRender {
+                surface,
+                hotspot: cursor_hotspot(surface),
+                location: self.pointer_location,
+            }),
+            _ => None,
+        };
+
         match &mut self.backend {
             BackendState::Nested(backend) => {
                 let size = backend.window_size();
@@ -611,26 +664,12 @@ impl SayukiState {
                     return Ok(());
                 }
 
+                let output = backend.output().clone();
                 let damage = Rectangle::from_size(size);
-                let logical_damage = Rectangle::from_size(size.to_logical(1));
                 {
                     let (renderer, mut framebuffer) = backend.graphics_mut().bind()?;
-                    let mut elements =
-                        self.space
-                            .render_elements_for_region(renderer, &logical_damage, 1.0, 1.0);
-                    if let CursorImageStatus::Surface(surface) = &self.cursor_image {
-                        let hotspot = cursor_hotspot(surface).to_f64();
-                        let cursor_location: Point<i32, Physical> =
-                            (self.pointer_location - hotspot).to_physical_precise_round(1.0);
-                        elements.extend(render_elements_from_surface_tree(
-                            renderer,
-                            surface,
-                            cursor_location,
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
-                        ));
-                    }
+                    let elements =
+                        render::output_elements(renderer, self.wm.active(), &output, cursor);
                     let mut frame =
                         renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
                     frame.clear(BACKGROUND, &[damage])?;
@@ -641,12 +680,7 @@ impl SayukiState {
                 self.send_frame_callbacks_for_all_outputs();
             }
             BackendState::Udev(backend) => {
-                backend.render(
-                    &self.space,
-                    &self.cursor_image,
-                    self.pointer_location,
-                    BACKGROUND,
-                )?;
+                backend.render(self.wm.active(), cursor, BACKGROUND)?;
             }
         }
 
@@ -657,27 +691,47 @@ impl SayukiState {
         self.start_time.elapsed().as_millis() as u32
     }
 
-    fn focus_window_at(&mut self, location: Point<f64, Logical>, serial: smithay::utils::Serial) {
-        let keyboard = self.keyboard.clone();
-        let Some(window) = self
-            .space
-            .element_under(location)
-            .map(|(window, _)| window.clone())
-        else {
-            keyboard.set_focus(self, None, serial);
-            return;
-        };
+    fn pointer_zoom(&self) -> f64 {
+        self.space()
+            .output_under(self.pointer_location)
+            .next()
+            .map(|output| self.wm.active().viewport(&output.name()).zoom)
+            .unwrap_or(1.0)
+    }
 
-        let focus = window
-            .toplevel()
-            .map(|toplevel| toplevel.wl_surface().clone());
-        self.space.raise_element(&window, true);
-        self.send_pending_window_configures();
-        keyboard.set_focus(self, focus, serial);
+    fn clamp_pointer(&self, location: Point<f64, Logical>) -> Point<f64, Logical> {
+        match self.wm.viewport_union() {
+            Some(bounds) => clamp_pointer_location(location, bounds),
+            None => location,
+        }
+    }
+
+    fn focused_output(&self) -> Option<Output> {
+        self.space()
+            .output_under(self.pointer_location)
+            .next()
+            .cloned()
+            .or_else(|| self.backend.primary_output().cloned())
+    }
+
+    fn collect_outputs(&self) -> Vec<Output> {
+        let mut outputs = Vec::new();
+        self.backend
+            .for_each_output(|output| outputs.push(output.clone()));
+        outputs
+    }
+
+    fn canvas_bounds(&self) -> Option<Rectangle<i32, Logical>> {
+        let space = self.space();
+        viewport::bounding_rect(
+            space
+                .elements()
+                .filter_map(|element| space.element_geometry(element)),
+        )
     }
 
     fn send_pending_window_configures(&self) {
-        for window in self.space.elements() {
+        for window in self.space().elements() {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_pending_configure();
             }
@@ -685,8 +739,8 @@ impl SayukiState {
     }
 
     fn send_frame_callbacks_for_output(&self, output: &Output, time: Duration) {
-        for window in self.space.elements() {
-            let outputs = self.space.outputs_for_element(window);
+        for window in self.space().elements() {
+            let outputs = self.space().outputs_for_element(window);
             if outputs.is_empty() {
                 if self.backend.primary_output() == Some(output) {
                     window.send_frame(output, time, Some(Duration::ZERO), |_, _| None);
@@ -713,8 +767,8 @@ impl SayukiState {
 
     fn send_frame_callbacks_for_all_outputs(&self) {
         let time = Duration::from_millis(u64::from(self.frame_time()));
-        for window in self.space.elements() {
-            let outputs = self.space.outputs_for_element(window);
+        for window in self.space().elements() {
+            let outputs = self.space().outputs_for_element(window);
             if outputs.is_empty() {
                 if let Some(output) = self.backend.primary_output() {
                     window.send_frame(output, time, Some(Duration::ZERO), |_, _| None);
@@ -741,7 +795,7 @@ impl SayukiState {
         self.backend.for_each_output(|output| {
             if cursor_output.is_none()
                 && self
-                    .space
+                    .space()
                     .output_geometry(output)
                     .map(|geometry| geometry.to_f64().contains(self.pointer_location))
                     .unwrap_or(false)
@@ -764,6 +818,15 @@ pub(crate) fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
     })
 }
 
+fn set_window_size(window: &Window, size: Size<i32, Logical>) {
+    if let Some(toplevel) = window.toplevel() {
+        toplevel.with_pending_state(|state| {
+            state.size = Some(size);
+        });
+        toplevel.send_pending_configure();
+    }
+}
+
 fn clamp_pointer_location(
     location: Point<f64, Logical>,
     bounds: Rectangle<i32, Logical>,
@@ -778,10 +841,6 @@ fn clamp_pointer_location(
         location.y.clamp(min_y, max_y),
     )
         .into()
-}
-
-fn surface_has_buffer(surface: &WlSurface) -> bool {
-    with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
 }
 
 #[cfg(test)]

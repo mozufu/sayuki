@@ -136,9 +136,11 @@ impl PointerGrab<SayukiState> for PointerMoveSurfaceGrab {
         handle.motion(data, None, event);
 
         let delta = event.location - self.start_data.location;
-        let new_location = self.initial_window_location.to_f64() + delta;
-        data.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), true);
+        let proposed = (self.initial_window_location.to_f64() + delta).to_i32_round();
+        let snapped = data.snap_move(&self.window, proposed);
+        data.space_mut()
+            .map_element(self.window.clone(), snapped, true);
+        data.edge_push_pan(event.location);
     }
 
     delegate_pointer_grab_methods!();
@@ -151,6 +153,7 @@ impl PointerGrab<SayukiState> for PointerMoveSurfaceGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
+            data.handle_move_drop(&self.window);
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
@@ -243,7 +246,7 @@ impl PointerGrab<SayukiState> for PointerResizeSurfaceGrab {
         request_window_size(&self.window, self.last_window_size, true);
 
         if self.edges.intersects(ResizeEdge::TOP_LEFT) {
-            data.space.map_element(
+            data.space_mut().map_element(
                 self.window.clone(),
                 self.resized_location(self.last_window_size),
                 true,
@@ -272,7 +275,7 @@ impl PointerGrab<SayukiState> for PointerResizeSurfaceGrab {
 
         request_window_size(&self.window, self.last_window_size, false);
         if self.edges.intersects(ResizeEdge::TOP_LEFT) {
-            data.space.map_element(
+            data.space_mut().map_element(
                 self.window.clone(),
                 self.resized_location(self.last_window_size),
                 true,
