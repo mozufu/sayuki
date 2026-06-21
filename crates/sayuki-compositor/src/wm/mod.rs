@@ -17,13 +17,18 @@ pub(crate) mod snap;
 pub(crate) mod swap;
 pub(crate) mod viewport;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use smithay::{
     desktop::{Space, Window},
     output::Output,
     utils::{Logical, Point, Rectangle},
 };
+
+use crate::project::{CanvasHooks, ProjectContext, WindowRule};
 
 use self::{focus::CycleDirection, pin::Pinned, snap::SnapConfig, viewport::Viewport};
 
@@ -37,6 +42,14 @@ pub(crate) enum PanCouple {
     /// All viewports pan/zoom together, preserving relative offsets (one sheet
     /// of glass).
     Linked,
+}
+
+/// A reference to a workspace/canvas by 1-based numeric index or project name
+/// (generalized in 5b; `workspace = 1` and `workspace = "sayuki"` both work).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceRef {
+    Index(u8),
+    Name(String),
 }
 
 /// Stable identifier for a [`Canvas`].
@@ -60,6 +73,19 @@ pub(crate) struct Canvas {
     focus: Vec<Window>,
     /// Windows stuck to an output's viewport (HUDs).
     pinned: Vec<Pinned>,
+    /// Project working directory (5b); `None` for a bare canvas.
+    working_dir: Option<PathBuf>,
+    /// Small env overlay applied to spawns (5b) — NOT a replacement for the
+    /// inherited environment, which direnv owns.
+    env: Vec<(String, String)>,
+    /// Lifecycle hooks (5b).
+    hooks: CanvasHooks,
+    /// Map-time window-routing rules owned by this project canvas (5b).
+    rules: Vec<WindowRule>,
+    /// Declarative apps launched once on first activation (5b).
+    apps: Vec<String>,
+    /// One-shot guard so `on_init`/`apps` run only on the first activation.
+    initialized: bool,
 }
 
 impl Canvas {
@@ -73,7 +99,76 @@ impl Canvas {
             minimap: HashSet::new(),
             focus: Vec::new(),
             pinned: Vec::new(),
+            working_dir: None,
+            env: Vec::new(),
+            hooks: CanvasHooks::default(),
+            rules: Vec::new(),
+            apps: Vec::new(),
+            initialized: false,
         }
+    }
+
+    /// A canvas carrying a resolved project context (5b).
+    fn with_context(id: CanvasId, name: String, context: ProjectContext) -> Self {
+        Self {
+            working_dir: context.working_dir,
+            env: context.env,
+            hooks: context.hooks,
+            rules: context.rules,
+            apps: context.apps,
+            ..Self::new(id, name)
+        }
+    }
+
+    /// Apply a project context to an existing canvas (e.g. when a `[[project]]`
+    /// name collides with the default canvas) rather than dropping it.
+    fn set_context(&mut self, context: ProjectContext) {
+        self.working_dir = context.working_dir;
+        self.env = context.env;
+        self.hooks = context.hooks;
+        self.rules = context.rules;
+        self.apps = context.apps;
+    }
+
+    pub(crate) fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
+    }
+
+    pub(crate) fn env(&self) -> &[(String, String)] {
+        &self.env
+    }
+
+    /// Commands to spawn when this canvas becomes active: on the first
+    /// activation the declarative `apps` then `on_init` (guarded by
+    /// `initialized`), then `on_enter` every time. Each entry is an argv to run
+    /// in the canvas's spawn context.
+    pub(crate) fn enter(&mut self) -> Vec<Vec<String>> {
+        let mut commands = Vec::new();
+        if !self.initialized {
+            self.initialized = true;
+            for app in &self.apps {
+                let argv: Vec<String> = app.split_whitespace().map(str::to_owned).collect();
+                if !argv.is_empty() {
+                    commands.push(argv);
+                }
+            }
+            if let Some(on_init) = &self.hooks.on_init {
+                commands.push(on_init.to_args());
+            }
+        }
+        if let Some(on_enter) = &self.hooks.on_enter {
+            commands.push(on_enter.to_args());
+        }
+        commands
+    }
+
+    /// Commands to spawn when this canvas is left (`on_leave`).
+    pub(crate) fn leave(&self) -> Vec<Vec<String>> {
+        self.hooks
+            .on_leave
+            .as_ref()
+            .map(|hook| vec![hook.to_args()])
+            .unwrap_or_default()
     }
 
     pub(crate) fn space(&self) -> &Space<Window> {
@@ -200,7 +295,12 @@ pub(crate) struct WindowManager {
 impl WindowManager {
     /// Create the manager with a single canvas named `"1"`, seeding contiguous
     /// viewports for `outputs` and mapping them into the active canvas.
-    pub(crate) fn new(outputs: &[Output], pan_couple: PanCouple, snap: SnapConfig) -> Self {
+    pub(crate) fn new(
+        outputs: &[Output],
+        pan_couple: PanCouple,
+        snap: SnapConfig,
+        projects: Vec<(String, ProjectContext)>,
+    ) -> Self {
         let id = CanvasId(0);
         let mut canvas = Canvas::new(id, "1".to_owned());
         for output in outputs {
@@ -208,10 +308,22 @@ impl WindowManager {
             canvas.space.map_output(output, viewport.loc);
         }
 
+        let mut canvases = vec![canvas];
+        let mut next_id = 1;
+        for (name, context) in projects {
+            if let Some(existing) = canvases.iter_mut().find(|canvas| canvas.name == name) {
+                existing.set_context(context);
+                continue;
+            }
+            let project_id = CanvasId(next_id);
+            next_id += 1;
+            canvases.push(Canvas::with_context(project_id, name, context));
+        }
+
         Self {
-            canvases: vec![canvas],
+            canvases,
             active: id,
-            next_id: 1,
+            next_id,
             pan_couple,
             snap,
         }
@@ -274,10 +386,13 @@ impl WindowManager {
         }))
     }
 
-    /// Find the canvas named after `index` (1-based workspace number), creating
-    /// it if necessary.
-    pub(crate) fn canvas_for_index(&mut self, index: u8) -> CanvasId {
-        let name = index.to_string();
+    /// Resolve a workspace reference to a canvas id, creating a bare canvas when
+    /// no project or numeric canvas of that name exists yet.
+    pub(crate) fn canvas_for(&mut self, reference: WorkspaceRef) -> CanvasId {
+        let name = match reference {
+            WorkspaceRef::Index(index) => index.to_string(),
+            WorkspaceRef::Name(name) => name,
+        };
         if let Some(canvas) = self.canvases.iter().find(|canvas| canvas.name == name) {
             return canvas.id;
         }
@@ -286,6 +401,17 @@ impl WindowManager {
         self.next_id += 1;
         self.canvases.push(Canvas::new(id, name));
         id
+    }
+
+    /// The project canvas whose rules pin a window with `app_id`/`title`, if any.
+    pub(crate) fn pin_target(&self, app_id: Option<&str>, title: Option<&str>) -> Option<CanvasId> {
+        self.canvases.iter().find_map(|canvas| {
+            canvas
+                .rules
+                .iter()
+                .any(|rule| rule.pin && rule.matches(app_id, title))
+                .then_some(canvas.id)
+        })
     }
 
     /// Switch the active canvas to `target`. Unmaps `outputs` from the old
@@ -363,5 +489,59 @@ impl WindowManager {
             }
         }
         removed_active_focus
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{ProjectContext, WindowRule};
+
+    fn project_with_rule() -> ProjectContext {
+        ProjectContext {
+            rules: vec![WindowRule {
+                app_id: Some("firefox".to_owned()),
+                title: None,
+                pin: true,
+            }],
+            ..ProjectContext::default()
+        }
+    }
+
+    #[test]
+    fn pin_target_routes_matching_window_to_project_canvas() {
+        let manager = WindowManager::new(
+            &[],
+            PanCouple::Independent,
+            SnapConfig::default(),
+            vec![("sayuki".to_owned(), project_with_rule())],
+        );
+
+        // A matching window resolves to the project canvas, which is not the
+        // active default canvas "1".
+        let target = manager
+            .pin_target(Some("firefox"), None)
+            .expect("firefox matches the project rule");
+        assert!(!manager.is_active(target));
+        // Non-matching windows are not routed (they stay on the active canvas).
+        assert_eq!(manager.pin_target(Some("ghostty"), None), None);
+    }
+
+    #[test]
+    fn canvas_for_resolves_index_and_name() {
+        let mut manager = WindowManager::new(
+            &[],
+            PanCouple::Independent,
+            SnapConfig::default(),
+            vec![("sayuki".to_owned(), project_with_rule())],
+        );
+
+        // The pre-created project canvas is reachable by name and is the same
+        // canvas the rule pins to.
+        let by_name = manager.canvas_for(WorkspaceRef::Name("sayuki".to_owned()));
+        assert_eq!(manager.pin_target(Some("firefox"), None), Some(by_name));
+        // A numeric reference resolves to (or creates) a distinct bare canvas.
+        let by_index = manager.canvas_for(WorkspaceRef::Index(2));
+        assert_ne!(by_index, by_name);
     }
 }

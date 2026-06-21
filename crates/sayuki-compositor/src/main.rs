@@ -24,6 +24,7 @@ mod grabs;
 mod input;
 mod logging;
 mod output;
+mod project;
 mod render;
 mod state;
 mod wayland;

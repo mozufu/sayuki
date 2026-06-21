@@ -47,11 +47,13 @@ use crate::{
     config::SayukiConfig,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
+    output::{self, OutputPolicy},
     render::{self, CursorRender},
     wm::{WindowManager, focus::CycleDirection, viewport},
 };
 
 mod actions;
+mod project;
 
 const BACKGROUND: Color32F = Color32F::new(0.07, 0.08, 0.11, 1.0);
 
@@ -76,6 +78,10 @@ pub(crate) struct SayukiState {
     pointer_location: Point<f64, Logical>,
     cursor_image: CursorImageStatus,
     next_window_index: i32,
+    output_policies: Vec<OutputPolicy>,
+    /// Windows awaiting one-shot window-rule routing once their client has set
+    /// app_id/title (which arrive after the toplevel role is created).
+    pending_rules: Vec<Window>,
     start_time: Instant,
     pub(crate) running: bool,
 }
@@ -104,9 +110,14 @@ impl SayukiState {
         let keybindings = KeybindingRegistry::from_configs(&config.keybindings)
             .map_err(|message| io::Error::new(ErrorKind::InvalidData, message))?;
 
+        let output_policies = config.outputs;
         let mut outputs = Vec::new();
         backend.for_each_output(|output| outputs.push(output.clone()));
-        let wm = WindowManager::new(&outputs, config.pan_couple, config.snap);
+        for output in &outputs {
+            output::apply_policy(output, &output_policies);
+        }
+        let projects = project::resolve_project_contexts(&config.projects);
+        let wm = WindowManager::new(&outputs, config.pan_couple, config.snap, projects);
 
         Ok(Self {
             compositor_state,
@@ -116,7 +127,7 @@ impl SayukiState {
             seat_state,
             wm,
             popups: PopupManager::default(),
-            action_runner: ActionRunner::default(),
+            action_runner: ActionRunner::new(),
             keybindings,
             display_handle,
             backend,
@@ -127,6 +138,8 @@ impl SayukiState {
             pointer_location: (0.0, 0.0).into(),
             cursor_image: CursorImageStatus::default_named(),
             next_window_index: 0,
+            output_policies,
+            pending_rules: Vec::new(),
             start_time: Instant::now(),
             running: true,
         })
@@ -221,7 +234,7 @@ impl SayukiState {
                 info!("quit action requested");
                 self.running = false;
             }
-            CompositorAction::Spawn(command) => self.action_runner.spawn(&command),
+            CompositorAction::Spawn(command) => self.spawn_in_active(&command),
             CompositorAction::BeginMove => self.begin_move_focused_window(),
             CompositorAction::BeginResize(edges) => self.begin_resize_focused_window(edges),
             CompositorAction::SwitchWorkspace(workspace) => self.switch_workspace(workspace),
@@ -339,6 +352,7 @@ impl SayukiState {
 
         backend.configure_output(size);
         let output = backend.output().clone();
+        output::apply_policy(&output, &self.output_policies);
         let location = self.wm.active().viewport(&output.name()).loc;
         self.wm.active_space_mut().map_output(&output, location);
     }
@@ -351,15 +365,19 @@ impl SayukiState {
     }
 
     pub(crate) fn add_toplevel(&mut self, surface: ToplevelSurface) {
+        // app_id/title are not set yet at role creation; place on the active
+        // canvas now and defer window-rule routing to the first buffered commit.
         let window = Window::new_wayland_window(surface);
         self.place_window(window.clone());
-        self.focus_window(window);
+        self.focus_window(window.clone());
+        self.pending_rules.push(window);
     }
 
     pub(crate) fn remove_toplevel(&mut self, surface: &WlSurface) {
         let Some(window) = self.window_for_toplevel_surface(surface) else {
             return;
         };
+        self.pending_rules.retain(|pending| pending != &window);
         if self.wm.remove_window(&window) {
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
@@ -394,6 +412,7 @@ impl SayukiState {
     pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
         if let Some(window) = self.window_for_toplevel_surface(surface) {
             window.on_commit();
+            self.route_pending_window(&window, surface);
         } else if let Some(window) = self.window_for_surface(surface) {
             window.on_commit();
         }
@@ -505,17 +524,20 @@ impl SayukiState {
         &mut self,
         event: SessionEvent,
     ) -> Result<(), Box<dyn Error>> {
-        let BackendState::Udev(backend) = &mut self.backend else {
-            debug!("session event ignored for non-udev backend");
-            return Ok(());
+        let result = {
+            let BackendState::Udev(backend) = &mut self.backend else {
+                debug!("session event ignored for non-udev backend");
+                return Ok(());
+            };
+            backend.handle_session_event(
+                event,
+                &self.display_handle,
+                &mut self.wm,
+                &mut self.pending_output_global_removals,
+            )
         };
-
-        backend.handle_session_event(
-            event,
-            &self.display_handle,
-            &mut self.wm,
-            &mut self.pending_output_global_removals,
-        )
+        self.apply_output_policies();
+        result
     }
 
     pub(crate) fn handle_udev_event(
@@ -524,18 +546,21 @@ impl SayukiState {
         display_handle: &DisplayHandle,
         loop_handle: &LoopHandle<Self>,
     ) -> Result<(), Box<dyn Error>> {
-        let BackendState::Udev(backend) = &mut self.backend else {
-            debug!("udev event ignored for non-udev backend");
-            return Ok(());
+        let result = {
+            let BackendState::Udev(backend) = &mut self.backend else {
+                debug!("udev event ignored for non-udev backend");
+                return Ok(());
+            };
+            backend.handle_udev_event(
+                event,
+                display_handle,
+                loop_handle,
+                &mut self.wm,
+                &mut self.pending_output_global_removals,
+            )
         };
-
-        backend.handle_udev_event(
-            event,
-            display_handle,
-            loop_handle,
-            &mut self.wm,
-            &mut self.pending_output_global_removals,
-        )
+        self.apply_output_policies();
+        result
     }
 
     pub(crate) fn handle_drm_event(

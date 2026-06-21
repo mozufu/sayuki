@@ -1,7 +1,10 @@
 use crate::{
     config::BindingActionConfig,
     grabs::ResizeEdge,
-    wm::swap::{Direction, SwapTarget},
+    wm::{
+        WorkspaceRef,
+        swap::{Direction, SwapTarget},
+    },
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,10 +14,10 @@ pub(crate) enum CompositorAction {
     Spawn(Vec<String>),
     BeginMove,
     BeginResize(ResizeEdge),
-    /// Switch the active canvas to the workspace numbered `workspace`.
-    SwitchWorkspace(u8),
-    /// Move the focused window to the workspace numbered `workspace`.
-    MoveToWorkspace(u8),
+    /// Switch the active canvas to the referenced workspace (index or name).
+    SwitchWorkspace(WorkspaceRef),
+    /// Move the focused window to the referenced workspace (index or name).
+    MoveToWorkspace(WorkspaceRef),
     /// Pan the viewport(s) by a logical-pixel delta.
     PanViewport {
         dx: i32,
@@ -45,10 +48,10 @@ impl CompositorAction {
                 parse_resize_edges(edges).map(Self::BeginResize)
             }
             BindingActionConfig::SwitchWorkspace { workspace } => {
-                Ok(Self::SwitchWorkspace(*workspace))
+                Ok(Self::SwitchWorkspace(workspace.clone()))
             }
             BindingActionConfig::MoveToWorkspace { workspace } => {
-                Ok(Self::MoveToWorkspace(*workspace))
+                Ok(Self::MoveToWorkspace(workspace.clone()))
             }
             BindingActionConfig::PanViewport { dx, dy } => {
                 Ok(Self::PanViewport { dx: *dx, dy: *dy })

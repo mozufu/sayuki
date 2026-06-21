@@ -6,6 +6,8 @@
 //! focused; as a descendant of `state` they still reach the private
 //! `SayukiState` fields and helpers directly.
 
+use std::path::Path;
+
 use smithay::{
     desktop::Window,
     output::Output,
@@ -16,7 +18,7 @@ use super::{SayukiState, set_window_size};
 use crate::{
     render,
     wm::{
-        PanCouple,
+        PanCouple, WorkspaceRef,
         focus::CycleDirection,
         pin::{self, Pinned, ViewportAnchor},
         snap,
@@ -97,22 +99,36 @@ impl SayukiState {
         }
     }
 
-    pub(super) fn switch_workspace(&mut self, index: u8) {
-        let target = self.wm.canvas_for_index(index);
+    pub(super) fn switch_workspace(&mut self, reference: WorkspaceRef) {
+        let target = self.wm.canvas_for(reference);
         if self.wm.is_active(target) {
             return;
         }
+
+        // Capture the outgoing canvas's on_leave hook in its own context.
+        let leave = self.wm.active().leave();
+        let leave_dir = self.wm.active().working_dir().map(Path::to_owned);
+        let leave_env = self.wm.active().env().to_vec();
+
         let outputs = self.collect_outputs();
         let focus = self.wm.switch_to(target, &outputs);
+        self.run_commands(leave, leave_dir.as_deref(), &leave_env);
+
+        // Run the incoming canvas's enter hooks (one-shot on_init/apps first).
+        let enter = self.wm.active_mut().enter();
+        let enter_dir = self.wm.active().working_dir().map(Path::to_owned);
+        let enter_env = self.wm.active().env().to_vec();
+        self.run_commands(enter, enter_dir.as_deref(), &enter_env);
+
         self.apply_focus(focus);
         self.send_pending_window_configures();
     }
 
-    pub(super) fn move_focused_to_workspace(&mut self, index: u8) {
+    pub(super) fn move_focused_to_workspace(&mut self, reference: WorkspaceRef) {
         let Some(window) = self.wm.active().focused().cloned() else {
             return;
         };
-        let target = self.wm.canvas_for_index(index);
+        let target = self.wm.canvas_for(reference);
         if self.wm.is_active(target) {
             return;
         }

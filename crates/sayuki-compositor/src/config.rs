@@ -1,14 +1,19 @@
 use std::{
+    collections::HashMap,
     error::Error,
     fs,
     io::{self, ErrorKind},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use serde::Deserialize;
 use smithay::input::keyboard::XkbConfig;
 
-use crate::wm::{PanCouple, snap::SnapConfig};
+use crate::{
+    output::OutputPolicy,
+    project::{HookCmd, ProjectConfig},
+    wm::{PanCouple, WorkspaceRef, snap::SnapConfig},
+};
 
 const DEFAULT_REPEAT_DELAY: i32 = 500;
 const DEFAULT_REPEAT_RATE: i32 = 25;
@@ -22,6 +27,8 @@ pub(crate) struct SayukiConfig {
     pub(crate) keybindings: Vec<KeybindingConfig>,
     pub(crate) pan_couple: PanCouple,
     pub(crate) snap: SnapConfig,
+    pub(crate) projects: Vec<ProjectConfig>,
+    pub(crate) outputs: Vec<OutputPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -48,8 +55,8 @@ pub(crate) enum BindingActionConfig {
     Spawn { command: Vec<String> },
     BeginMove,
     BeginResize { edges: String },
-    SwitchWorkspace { workspace: u8 },
-    MoveToWorkspace { workspace: u8 },
+    SwitchWorkspace { workspace: WorkspaceRef },
+    MoveToWorkspace { workspace: WorkspaceRef },
     PanViewport { dx: i32, dy: i32 },
     ZoomViewport { factor: f64 },
     ToggleOverview,
@@ -69,6 +76,8 @@ struct RawConfig {
     pan: RawPanConfig,
     #[serde(default)]
     snap: RawSnapConfig,
+    project: Option<Vec<RawProject>>,
+    output: Option<Vec<RawOutput>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,11 +86,34 @@ struct RawKeybindingConfig {
     action: String,
     command: Option<CommandConfig>,
     edges: Option<String>,
-    workspace: Option<u8>,
+    workspace: Option<RawWorkspaceRef>,
     dx: Option<i32>,
     dy: Option<i32>,
     factor: Option<f64>,
     target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWorkspaceRef {
+    Index(u8),
+    Name(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProject {
+    name: String,
+    path: String,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    on_init: Option<HookCmd>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOutput {
+    name: String,
+    scale: Option<i32>,
+    transform: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -148,6 +180,8 @@ impl Default for SayukiConfig {
             keybindings: default_keybindings(),
             pan_couple: PanCouple::default(),
             snap: SnapConfig::default(),
+            projects: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 }
@@ -192,11 +226,26 @@ impl RawConfig {
             None => default_keybindings(),
         };
 
+        let projects = self
+            .project
+            .unwrap_or_default()
+            .into_iter()
+            .map(RawProject::into_project)
+            .collect();
+        let outputs = self
+            .output
+            .unwrap_or_default()
+            .into_iter()
+            .map(RawOutput::into_policy)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(SayukiConfig {
             keyboard: self.keyboard,
             keybindings,
             pan_couple: self.pan.into_couple()?,
             snap: self.snap.into_snap(),
+            projects,
+            outputs,
         })
     }
 }
@@ -303,14 +352,53 @@ impl RawKeybindingConfig {
         })
     }
 
-    fn require_workspace(&self) -> Result<u8, io::Error> {
-        self.workspace.ok_or_else(|| {
-            invalid_keybinding(format!(
-                "keybinding `{}` uses action `{}` without `workspace`",
-                self.keys, self.action
-            ))
-        })
+    fn require_workspace(&self) -> Result<WorkspaceRef, io::Error> {
+        self.workspace
+            .as_ref()
+            .map(RawWorkspaceRef::to_ref)
+            .ok_or_else(|| {
+                invalid_keybinding(format!(
+                    "keybinding `{}` uses action `{}` without `workspace`",
+                    self.keys, self.action
+                ))
+            })
     }
+}
+
+impl RawWorkspaceRef {
+    fn to_ref(&self) -> WorkspaceRef {
+        match self {
+            RawWorkspaceRef::Index(index) => WorkspaceRef::Index(*index),
+            RawWorkspaceRef::Name(name) => WorkspaceRef::Name(name.clone()),
+        }
+    }
+}
+
+impl RawProject {
+    fn into_project(self) -> ProjectConfig {
+        ProjectConfig {
+            name: self.name,
+            path: expand_tilde(&self.path),
+            env: self.env.into_iter().collect(),
+            on_init: self.on_init,
+        }
+    }
+}
+
+impl RawOutput {
+    fn into_policy(self) -> Result<OutputPolicy, io::Error> {
+        OutputPolicy::new(self.name, self.scale, self.transform.as_deref())
+            .map_err(invalid_keybinding)
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
 }
 
 impl CommandConfig {
@@ -340,11 +428,15 @@ fn default_keybindings() -> Vec<KeybindingConfig> {
     for workspace in 1..=4u8 {
         bindings.push(KeybindingConfig {
             keys: format!("Alt+{workspace}"),
-            action: BindingActionConfig::SwitchWorkspace { workspace },
+            action: BindingActionConfig::SwitchWorkspace {
+                workspace: WorkspaceRef::Index(workspace),
+            },
         });
         bindings.push(KeybindingConfig {
             keys: format!("Alt+Shift+{workspace}"),
-            action: BindingActionConfig::MoveToWorkspace { workspace },
+            action: BindingActionConfig::MoveToWorkspace {
+                workspace: WorkspaceRef::Index(workspace),
+            },
         });
     }
 
