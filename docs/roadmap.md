@@ -91,7 +91,7 @@ environment; Sayuki owns the windows and session.
 See `docs/milestone-5-window-manager-model.md` for the detailed spec, split into
 5a (canvas/viewport WM core / mechanism) and 5b (project session layer / policy).
 
-5a — canvas/viewport WM core:
+5a — canvas/viewport WM core (✅ complete in `crates/sayuki-compositor`):
 
 - viewport over an unbounded canvas; windows at free, persistent coordinates,
   no clamping to outputs

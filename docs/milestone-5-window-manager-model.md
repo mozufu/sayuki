@@ -8,9 +8,9 @@ swaps the canvas. A workspace is not a numeric slot but a project context (a
 named canvas) that carries a working directory, an environment (via direnv), and
 a desktop session (apps, layout, window rules).
 
-Status: planned. Split into **5a (canvas/viewport WM core / mechanism)** and
-**5b (project session layer / policy)**. 5a ships first and stands alone; 5b
-builds on it.
+Status: **5a complete** in `crates/sayuki-compositor`; **5b planned**. Split into
+**5a (canvas/viewport WM core / mechanism)** and **5b (project session layer /
+policy)**. 5a shipped first and stands alone; 5b builds on it.
 
 ## Guiding principle: mechanism core, policy outside, IPC seam between
 
