@@ -80,29 +80,38 @@ first, then abstract only the parts Sayuki actually needs to differ.
 
 ### 5. Window manager model
 
-Move from "example compositor" behavior to Sayuki's own policy. Sayuki is
-project-oriented: a workspace is a project context, not a numeric slot. It
-carries a working directory, an environment (via direnv), and a desktop session
-(apps, layout, window rules). direnv owns the environment; Sayuki owns the
-windows and session.
+Move from "example compositor" behavior to Sayuki's own policy: a **viewport
+over an unbounded canvas**, oriented around projects. Windows float at free,
+persistent canvas coordinates; monitors are viewports on the canvas; switching
+project/workspace swaps the canvas. A workspace is a project context (a named
+canvas), not a numeric slot — carrying a working directory, an environment (via
+direnv), and a desktop session (apps, layout, window rules). direnv owns the
+environment; Sayuki owns the windows and session.
 
 See `docs/milestone-5-window-manager-model.md` for the detailed spec, split into
-5a (WM core / mechanism) and 5b (project session layer / policy).
+5a (canvas/viewport WM core / mechanism) and 5b (project session layer / policy).
 
-5a — WM core:
+5a — canvas/viewport WM core:
 
-- workspaces with explicit per-workspace focus stacks
-- output assignment and output-aware placement
-- floating windows with persisted geometry
+- viewport over an unbounded canvas; windows at free, persistent coordinates,
+  no clamping to outputs
+- a canvas per project/workspace, each its own Smithay `Space`; switching swaps
+  the canvas (cameras move, windows stay)
+- multiple monitors as viewports on the shared canvas, independently
+  pannable/zoomable (configurable: linked)
+- per-canvas focus stacks with reveal-on-focus
+- pin-to-viewport (sticky HUD) windows
+- snap-on-drag and window swap
+- navigation: zoom, overview (fit-all), minimap
 
 5b — project session layer:
 
-- project context per workspace: working directory, env overlay, lifecycle hooks
+- project context per canvas: working directory, env overlay, lifecycle hooks
 - direnv integration for spawned processes (`direnv exec`, non-interactive)
 - `.sayuki` project files plus central `[[project]]` config, with a trust gate
 - window rules
 - per-output scale and transform policy
-- tiling layouts, if desired (deferred beyond a floating-only layout)
+- tiling layouts (deferred; snap/swap is the floating-first substitute)
 
 ### 6. Desktop protocols and polish
 
