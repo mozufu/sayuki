@@ -104,7 +104,7 @@ See `docs/milestone-5-window-manager-model.md` for the detailed spec, split into
 - snap-on-drag and window swap
 - navigation: zoom, overview (fit-all), minimap
 
-5b — project session layer:
+5b — project session layer (✅ complete in `crates/sayuki-compositor`; tiling deferred):
 
 - project context per canvas: working directory, env overlay, lifecycle hooks
 - direnv integration for spawned processes (`direnv exec`, non-interactive)
