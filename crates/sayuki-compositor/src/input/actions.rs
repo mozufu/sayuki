@@ -36,6 +36,7 @@ pub(crate) enum CompositorAction {
     /// Cycle focus through the active canvas's MRU stack.
     FocusNext,
     FocusPrev,
+    ToggleHelp,
 }
 
 impl CompositorAction {
@@ -65,6 +66,29 @@ impl CompositorAction {
             }
             BindingActionConfig::FocusNext => Ok(Self::FocusNext),
             BindingActionConfig::FocusPrev => Ok(Self::FocusPrev),
+            BindingActionConfig::ToggleHelp => Ok(Self::ToggleHelp),
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::None => "No action",
+            Self::Quit => "Quit Sayuki",
+            Self::Spawn(_) => "Spawn command",
+            Self::BeginMove => "Move focused window",
+            Self::BeginResize(_) => "Resize focused window",
+            Self::SwitchWorkspace(_) => "Switch workspace",
+            Self::MoveToWorkspace(_) => "Move window to workspace",
+            Self::PanViewport { .. } => "Pan viewport",
+            Self::ZoomViewport(factor) if *factor > 1.0 => "Zoom in",
+            Self::ZoomViewport(_) => "Zoom out",
+            Self::ToggleOverview => "Toggle overview",
+            Self::ToggleMinimap => "Toggle minimap",
+            Self::TogglePin => "Pin or unpin window",
+            Self::SwapWindow(_) => "Swap focused window",
+            Self::FocusNext => "Focus next window",
+            Self::FocusPrev => "Focus previous window",
+            Self::ToggleHelp => "Toggle keymap help",
         }
     }
 }

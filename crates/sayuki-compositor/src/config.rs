@@ -65,6 +65,7 @@ pub(crate) enum BindingActionConfig {
     SwapWindow { target: String },
     FocusNext,
     FocusPrev,
+    ToggleHelp,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +339,7 @@ impl RawKeybindingConfig {
             }
             "focus-next" => BindingActionConfig::FocusNext,
             "focus-prev" | "focus-previous" => BindingActionConfig::FocusPrev,
+            "help" | "toggle-help" | "keymap-help" => BindingActionConfig::ToggleHelp,
             _ => {
                 return Err(invalid_keybinding(format!(
                     "keybinding `{}` uses unknown action `{}`",
@@ -421,6 +423,10 @@ fn default_keybindings() -> Vec<KeybindingConfig> {
         KeybindingConfig {
             keys: "Alt+Shift+Q".to_owned(),
             action: BindingActionConfig::Quit,
+        },
+        KeybindingConfig {
+            keys: "Super+Shift+Slash".to_owned(),
+            action: BindingActionConfig::ToggleHelp,
         },
     ];
 

@@ -11,6 +11,7 @@
 //! live renderer); the geometry it relies on lives in [`crate::wm::viewport`]
 //! and is tested there.
 
+pub(crate) mod help;
 use smithay::{
     backend::renderer::{
         ImportAll, Renderer, Texture,
@@ -75,6 +76,7 @@ pub(crate) fn output_elements<R>(
     canvas: &Canvas,
     output: &Output,
     cursor: Option<CursorRender<'_>>,
+    help_menu: Option<&help::HelpMenu>,
 ) -> Vec<SayukiRenderElement<R>>
 where
     R: Renderer + ImportAll,
@@ -89,9 +91,10 @@ where
 
     let mut elements: Vec<SayukiRenderElement<R>> = Vec::new();
 
-    // Cursor first so it stays on top of every overlay. Its position is scaled
-    // by the zoom so it tracks the interaction point; the surface itself is
-    // drawn native size (a HUD), so the hotspot offset is not scaled.
+    // Cursor first so it stays above the compositor help overlay and every
+    // client-provided layer/window surface. Its position is scaled by the zoom
+    // so it tracks the interaction point; the surface itself is drawn native
+    // size (a HUD), so the hotspot offset is not scaled.
     if let Some(cursor) = cursor
         && region.to_f64().contains(cursor.location)
     {
@@ -110,6 +113,9 @@ where
             .into_iter()
             .map(SayukiRenderElement::Surface),
         );
+    }
+    if let Some(help_menu) = help_menu {
+        help_elements(help_menu, output_size, &mut elements);
     }
     layer_elements(renderer, output, WlrLayer::Overlay, &mut elements);
     layer_elements(renderer, output, WlrLayer::Top, &mut elements);
@@ -311,6 +317,38 @@ fn minimap_elements<R>(
 
     // Backdrop below the content for legibility.
     elements.push(SayukiRenderElement::Solid(solid(minimap, MINIMAP_BACKDROP)));
+}
+
+fn help_elements<R>(
+    help_menu: &help::HelpMenu,
+    output_size: Size<i32, Logical>,
+    elements: &mut Vec<SayukiRenderElement<R>>,
+) where
+    R: Renderer + ImportAll,
+    R::TextureId: Texture + Clone + 'static,
+{
+    let Some(layout) = help_menu.layout(output_size) else {
+        return;
+    };
+    elements.push(SayukiRenderElement::Solid(solid(
+        layout.panel,
+        [0.02, 0.03, 0.05, 0.88],
+    )));
+    for row in layout.rows {
+        for rect in help::text_rects(&row.keys, row.baseline) {
+            elements.push(SayukiRenderElement::Solid(solid(
+                rect,
+                [0.85, 0.90, 1.0, 1.0],
+            )));
+        }
+        let action_origin = Point::from((row.action_x, row.baseline.y));
+        for rect in help::text_rects(&row.action, action_origin) {
+            elements.push(SayukiRenderElement::Solid(solid(
+                rect,
+                [0.68, 0.74, 0.84, 1.0],
+            )));
+        }
+    }
 }
 
 /// The bounding rectangle of every window on the canvas, in canvas coordinates.

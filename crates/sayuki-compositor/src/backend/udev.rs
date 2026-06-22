@@ -306,6 +306,7 @@ impl NativeBackend {
         canvas: &Canvas,
         cursor: Option<CursorRender<'_>>,
         background: Color32F,
+        help_menu: Option<&render::help::HelpMenu>,
     ) -> Result<(), Box<dyn Error>> {
         if !self.active {
             return Ok(());
@@ -325,7 +326,8 @@ impl NativeBackend {
             if native_output.pending_frame {
                 continue;
             }
-            let elements = render::output_elements(renderer, canvas, &native_output.output, cursor);
+            let elements =
+                render::output_elements(renderer, canvas, &native_output.output, cursor, help_menu);
 
             let render_result = native_output.drm_output.render_frame(
                 renderer,

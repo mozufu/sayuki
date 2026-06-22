@@ -17,10 +17,11 @@ struct Keybinding {
     action: CompositorAction,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct KeyCombo {
     modifiers: KeyModifiers,
     keysym: Keysym,
+    label: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -47,6 +48,12 @@ impl KeybindingRegistry {
             bindings,
             suppressed_keycodes: Vec::new(),
         })
+    }
+
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &CompositorAction)> {
+        self.bindings
+            .iter()
+            .map(|binding| (binding.combo.label.as_str(), &binding.action))
     }
 
     pub(crate) fn filter_key(
@@ -136,7 +143,11 @@ impl KeyCombo {
             return Err(format!("keybinding `{input}` does not contain a key"));
         };
 
-        Ok(Self { modifiers, keysym })
+        Ok(Self {
+            modifiers,
+            keysym,
+            label: normalize_label(input)?,
+        })
     }
 
     fn matches(&self, modifiers: &ModifiersState, keysym: Keysym) -> bool {
@@ -170,6 +181,7 @@ fn parse_keysym(name: &str) -> Option<Keysym> {
         "backspace" => "BackSpace",
         "space" => "space",
         "tab" => "Tab",
+        "slash" => "slash",
         _ => name,
     };
 
@@ -199,6 +211,30 @@ fn keysym_from_name(name: &str, flags: xkb::KeysymFlags) -> Keysym {
     xkb::keysym_from_name(name, flags)
 }
 
+fn normalize_label(input: &str) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for raw_part in input.split('+') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return Err(format!("invalid empty keybinding segment in `{input}`"));
+        }
+        parts.push(match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "Ctrl".to_owned(),
+            "alt" | "mod1" => "Alt".to_owned(),
+            "shift" => "Shift".to_owned(),
+            "super" | "logo" | "meta" | "mod4" => "Super".to_owned(),
+            "enter" => "Enter".to_owned(),
+            "esc" | "escape" => "Escape".to_owned(),
+            "backspace" => "Backspace".to_owned(),
+            "space" => "Space".to_owned(),
+            "tab" => "Tab".to_owned(),
+            "slash" => "/".to_owned(),
+            _ => part.to_owned(),
+        });
+    }
+    Ok(parts.join(" + "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +250,11 @@ mod tests {
     fn parses_shifted_letters_exactly() {
         assert_eq!(parse_keysym("Q"), Some(Keysym::Q));
         assert_eq!(parse_keysym("q"), Some(Keysym::q));
+    }
+
+    #[test]
+    fn labels_normalized_bindings() {
+        let combo = KeyCombo::parse("Super+Shift+Slash").expect("combo");
+        assert_eq!(combo.label, "Super + Shift + /");
     }
 }

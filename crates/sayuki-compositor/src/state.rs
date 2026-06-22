@@ -60,7 +60,10 @@ use crate::{
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
     output::{self, OutputPolicy},
-    render::{self, CursorRender},
+    render::{
+        self, CursorRender,
+        help::{HelpEntry, HelpMenu},
+    },
     wm::{WindowManager, focus::CycleDirection, viewport},
 };
 
@@ -81,6 +84,8 @@ pub(crate) struct SayukiState {
     pub(crate) popups: PopupManager,
     action_runner: ActionRunner,
     keybindings: KeybindingRegistry,
+    help_menu: HelpMenu,
+    help_visible: bool,
 
     display_handle: DisplayHandle,
     backend: BackendState,
@@ -125,6 +130,15 @@ impl SayukiState {
         let pointer = seat.add_pointer();
         let keybindings = KeybindingRegistry::from_configs(&config.keybindings)
             .map_err(|message| io::Error::new(ErrorKind::InvalidData, message))?;
+        let help_menu = HelpMenu::new(
+            keybindings
+                .entries()
+                .map(|(keys, action)| HelpEntry {
+                    keys: keys.to_owned(),
+                    action: action.label().to_owned(),
+                })
+                .collect(),
+        );
 
         let output_policies = config.outputs;
         let mut outputs = Vec::new();
@@ -147,6 +161,8 @@ impl SayukiState {
             popups: PopupManager::default(),
             action_runner: ActionRunner::new(),
             keybindings,
+            help_menu,
+            help_visible: false,
             display_handle,
             backend,
             pending_output_global_removals: Vec::new(),
@@ -267,6 +283,7 @@ impl SayukiState {
             CompositorAction::SwapWindow(target) => self.swap_focused(target),
             CompositorAction::FocusNext => self.cycle_focus(CycleDirection::Forward),
             CompositorAction::FocusPrev => self.cycle_focus(CycleDirection::Backward),
+            CompositorAction::ToggleHelp => self.help_visible = !self.help_visible,
         }
     }
 
@@ -768,6 +785,7 @@ impl SayukiState {
             }),
             _ => None,
         };
+        let help_menu = self.help_visible.then_some(&self.help_menu);
 
         match &mut self.backend {
             BackendState::Nested(backend) => {
@@ -780,8 +798,13 @@ impl SayukiState {
                 let damage = Rectangle::from_size(size);
                 {
                     let (renderer, mut framebuffer) = backend.graphics_mut().bind()?;
-                    let elements =
-                        render::output_elements(renderer, self.wm.active(), &output, cursor);
+                    let elements = render::output_elements(
+                        renderer,
+                        self.wm.active(),
+                        &output,
+                        cursor,
+                        help_menu,
+                    );
                     let mut frame =
                         renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
                     frame.clear(BACKGROUND, &[damage])?;
@@ -792,7 +815,7 @@ impl SayukiState {
                 self.send_frame_callbacks_for_all_outputs();
             }
             BackendState::Udev(backend) => {
-                backend.render(self.wm.active(), cursor, BACKGROUND)?;
+                backend.render(self.wm.active(), cursor, BACKGROUND, help_menu)?;
             }
         }
 
