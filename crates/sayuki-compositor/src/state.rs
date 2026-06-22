@@ -19,7 +19,10 @@ use smithay::{
         udev::UdevEvent,
         winit::WinitEvent,
     },
-    desktop::{PopupManager, Space, Window, WindowSurfaceType, utils::send_frames_surface_tree},
+    desktop::{
+        LayerMap, LayerSurface as DesktopLayerSurface, PopupManager, Space, Window,
+        WindowSurfaceType, layer_map_for_output, utils::send_frames_surface_tree,
+    },
     input::{
         Seat, SeatState,
         keyboard::KeyboardHandle,
@@ -30,13 +33,22 @@ use smithay::{
     },
     output::Output,
     reexports::wayland_server::{
-        Display, DisplayHandle, backend::GlobalId, protocol::wl_surface::WlSurface,
+        Display, DisplayHandle,
+        backend::GlobalId,
+        protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     },
     utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorState, with_states},
+        output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::{ToplevelSurface, XdgShellState},
+        shell::{
+            wlr_layer::{
+                KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
+                WlrLayerShellState,
+            },
+            xdg::{ToplevelSurface, XdgShellState},
+        },
         shm::ShmState,
     },
 };
@@ -59,7 +71,9 @@ const BACKGROUND: Color32F = Color32F::new(0.07, 0.08, 0.11, 1.0);
 
 pub(crate) struct SayukiState {
     pub(crate) compositor_state: CompositorState,
+    pub(crate) _output_manager_state: OutputManagerState,
     pub(crate) xdg_shell_state: XdgShellState,
+    pub(crate) layer_shell_state: WlrLayerShellState,
     pub(crate) shm_state: ShmState,
     pub(crate) data_device_state: DataDeviceState,
     pub(crate) seat_state: SeatState<Self>,
@@ -95,7 +109,9 @@ impl SayukiState {
         let display_handle = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&display_handle);
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
 
@@ -121,7 +137,9 @@ impl SayukiState {
 
         Ok(Self {
             compositor_state,
+            _output_manager_state: output_manager_state,
             xdg_shell_state,
+            layer_shell_state,
             shm_state,
             data_device_state,
             seat_state,
@@ -357,6 +375,58 @@ impl SayukiState {
         self.wm.active_space_mut().map_output(&output, location);
     }
 
+    pub(crate) fn add_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        output: Option<WlOutput>,
+        namespace: String,
+    ) {
+        let output = output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .or_else(|| self.focused_output());
+        let Some(output) = output else {
+            debug!(namespace, "layer surface ignored because no output exists");
+            return;
+        };
+
+        surface.with_pending_state(|state| {
+            state.size = self
+                .space()
+                .output_geometry(&output)
+                .map(|geometry| geometry.size);
+        });
+        let layer = DesktopLayerSurface::new(surface.clone(), namespace);
+        let mut layer_map = layer_map_for_output(&output);
+        if let Err(error) = layer_map.map_layer(&layer) {
+            debug!(?error, output = %output.name(), "failed to map layer surface");
+        }
+    }
+
+    pub(crate) fn remove_layer_surface(&mut self, layer: &WlrLayerSurface) {
+        let surface = layer.wl_surface();
+        self.for_each_layer_map(|layer_map| {
+            if let Some(layer) = layer_map
+                .layer_for_surface(surface, WindowSurfaceType::ALL)
+                .cloned()
+            {
+                layer_map.unmap_layer(&layer);
+            }
+        });
+    }
+
+    pub(crate) fn arrange_layer_for_surface(&mut self, surface: &WlSurface) {
+        self.for_each_layer_map(|layer_map| {
+            if let Some(layer) = layer_map
+                .layer_for_surface(surface, WindowSurfaceType::ALL)
+                .cloned()
+            {
+                layer_map.arrange();
+                layer.layer_surface().send_pending_configure();
+            }
+        });
+    }
+
     pub(crate) fn primary_output_geometry(&self) -> Rectangle<i32, Logical> {
         self.backend
             .primary_output()
@@ -405,8 +475,8 @@ impl SayukiState {
         self.space()
             .output_under(self.pointer_location)
             .next()
-            .and_then(|output| self.space().output_geometry(output))
-            .unwrap_or_else(|| self.primary_output_geometry())
+            .and_then(|output| self.output_work_area(output))
+            .unwrap_or_else(|| self.primary_work_area())
     }
 
     pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
@@ -415,6 +485,8 @@ impl SayukiState {
             self.route_pending_window(&window, surface);
         } else if let Some(window) = self.window_for_surface(surface) {
             window.on_commit();
+        } else {
+            self.arrange_layer_for_surface(surface);
         }
     }
 
@@ -460,14 +532,23 @@ impl SayukiState {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space()
-            .element_under(location)
-            .and_then(|(window, window_location)| {
-                window
-                    .surface_under(location - window_location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, surface_location)| {
-                        (surface, (window_location + surface_location).to_f64())
+        self.layer_surface_under(location, &[WlrLayer::Overlay, WlrLayer::Top])
+            .or_else(|| {
+                self.space()
+                    .element_under(location)
+                    .and_then(|(window, window_location)| {
+                        window
+                            .surface_under(
+                                location - window_location.to_f64(),
+                                WindowSurfaceType::ALL,
+                            )
+                            .map(|(surface, surface_location)| {
+                                (surface, (window_location + surface_location).to_f64())
+                            })
                     })
+            })
+            .or_else(|| {
+                self.layer_surface_under(location, &[WlrLayer::Bottom, WlrLayer::Background])
             })
     }
 
@@ -475,6 +556,12 @@ impl SayukiState {
     /// bounds and maximize/fullscreen sizing — the window's own output, not a
     /// fixed primary.
     pub(crate) fn window_output_geometry(&self, window: &Window) -> Rectangle<i32, Logical> {
+        self.output_for_window(window)
+            .and_then(|output| self.output_work_area(&output))
+            .unwrap_or_else(|| self.primary_work_area())
+    }
+
+    pub(crate) fn window_full_output_geometry(&self, window: &Window) -> Rectangle<i32, Logical> {
         self.output_for_window(window)
             .and_then(|output| self.space().output_geometry(&output))
             .unwrap_or_else(|| self.primary_output_geometry())
@@ -763,7 +850,99 @@ impl SayukiState {
         }
     }
 
+    fn primary_work_area(&self) -> Rectangle<i32, Logical> {
+        self.backend
+            .primary_output()
+            .and_then(|output| self.output_work_area(output))
+            .unwrap_or_else(|| self.primary_output_geometry())
+    }
+
+    fn output_work_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
+        let output_geometry = self.space().output_geometry(output)?;
+        let mut layer_map = layer_map_for_output(output);
+        layer_map.arrange();
+        let zone = layer_map.non_exclusive_zone();
+        Some(Rectangle::new(output_geometry.loc + zone.loc, zone.size))
+    }
+
+    fn layer_surface_under(
+        &self,
+        location: Point<f64, Logical>,
+        layers: &[WlrLayer],
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        for output in self.space().output_under(location) {
+            let output_geometry = self.space().output_geometry(output)?;
+            let output_location = location - output_geometry.loc.to_f64();
+            let layer_map = layer_map_for_output(output);
+            for layer in layers {
+                if let Some(surface) = layer_map.layer_under(*layer, output_location) {
+                    let geometry = layer_map.layer_geometry(surface)?;
+                    return surface
+                        .surface_under(
+                            output_location - geometry.loc.to_f64(),
+                            WindowSurfaceType::ALL,
+                        )
+                        .map(|(surface, surface_location)| {
+                            (
+                                surface,
+                                (output_geometry.loc + geometry.loc + surface_location).to_f64(),
+                            )
+                        });
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn layer_keyboard_focus_under(
+        &self,
+        location: Point<f64, Logical>,
+        layers: &[WlrLayer],
+    ) -> Option<WlSurface> {
+        for output in self.space().output_under(location) {
+            let output_geometry = self.space().output_geometry(output)?;
+            let output_location = location - output_geometry.loc.to_f64();
+            let layer_map = layer_map_for_output(output);
+            for layer in layers {
+                if let Some(surface) = layer_map.layer_under(*layer, output_location)
+                    && surface.can_receive_keyboard_focus()
+                {
+                    return Some(surface.wl_surface().clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn exclusive_layer_focus(&self) -> Option<WlSurface> {
+        for output in self.collect_outputs() {
+            let layer_map = layer_map_for_output(&output);
+            for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+                if let Some(surface) = layer_map.layers_on(layer).rev().find(|surface| {
+                    surface.cached_state().keyboard_interactivity
+                        == KeyboardInteractivity::Exclusive
+                }) {
+                    return Some(surface.wl_surface().clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn for_each_layer_map(&self, mut f: impl FnMut(&mut LayerMap)) {
+        self.backend.for_each_output(|output| {
+            let mut layer_map = layer_map_for_output(output);
+            f(&mut layer_map);
+        });
+    }
+
     fn send_frame_callbacks_for_output(&self, output: &Output, time: Duration) {
+        for layer in layer_map_for_output(output).layers() {
+            layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+
         for window in self.space().elements() {
             let outputs = self.space().outputs_for_element(window);
             if outputs.is_empty() {
@@ -792,6 +971,14 @@ impl SayukiState {
 
     fn send_frame_callbacks_for_all_outputs(&self) {
         let time = Duration::from_millis(u64::from(self.frame_time()));
+        for output in self.collect_outputs() {
+            for layer in layer_map_for_output(&output).layers() {
+                layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
+        }
+
         for window in self.space().elements() {
             let outputs = self.space().outputs_for_element(window);
             if outputs.is_empty() {

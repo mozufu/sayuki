@@ -21,8 +21,11 @@ use smithay::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
         },
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        shell::{
+            wlr_layer::{
+                Layer, LayerSurface as WlrLayerSurface, WlrLayerShellHandler, WlrLayerShellState,
+            },
+            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -225,7 +228,7 @@ impl XdgShellHandler for SayukiState {
     ) {
         let output_geometry = self
             .window_for_toplevel_surface(surface.wl_surface())
-            .map(|window| self.window_output_geometry(&window))
+            .map(|window| self.window_full_output_geometry(&window))
             .unwrap_or_else(|| self.primary_output_geometry());
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Fullscreen);
@@ -244,6 +247,26 @@ impl XdgShellHandler for SayukiState {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.remove_toplevel(surface.wl_surface());
+    }
+}
+
+impl WlrLayerShellHandler for SayukiState {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+        _layer: Layer,
+        namespace: String,
+    ) {
+        self.add_layer_surface(surface, output, namespace);
+    }
+
+    fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        self.remove_layer_surface(&surface);
     }
 }
 

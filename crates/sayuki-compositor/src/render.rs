@@ -21,11 +21,12 @@ use smithay::{
             utils::{CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement},
         },
     },
-    desktop::{Space, Window},
+    desktop::{LayerSurface, Space, Window, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     render_elements,
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
+    wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
 use crate::wm::{
@@ -110,6 +111,8 @@ where
             .map(SayukiRenderElement::Surface),
         );
     }
+    layer_elements(renderer, output, WlrLayer::Overlay, &mut elements);
+    layer_elements(renderer, output, WlrLayer::Top, &mut elements);
 
     // Minimap overlay above the windows.
     if canvas.minimap_enabled(&output.name()) {
@@ -166,7 +169,51 @@ where
         }
     }
 
+    layer_elements(renderer, output, WlrLayer::Bottom, &mut elements);
+    layer_elements(renderer, output, WlrLayer::Background, &mut elements);
+
     elements
+}
+
+fn layer_elements<R>(
+    renderer: &mut R,
+    output: &Output,
+    layer: WlrLayer,
+    elements: &mut Vec<SayukiRenderElement<R>>,
+) where
+    R: Renderer + ImportAll,
+    R::TextureId: Texture + Clone + 'static,
+{
+    let layer_map = layer_map_for_output(output);
+    for surface in layer_map.layers_on(layer).rev() {
+        elements.extend(layer_surface_elements(renderer, &layer_map, surface));
+    }
+}
+
+fn layer_surface_elements<R>(
+    renderer: &mut R,
+    layer_map: &smithay::desktop::LayerMap,
+    surface: &LayerSurface,
+) -> Vec<SayukiRenderElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Texture + Clone + 'static,
+{
+    let Some(geometry) = layer_map.layer_geometry(surface) else {
+        return Vec::new();
+    };
+
+    render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
+        renderer,
+        surface.wl_surface(),
+        geometry.loc.to_physical_precise_round(1.0),
+        1.0,
+        1.0,
+        Kind::Unspecified,
+    )
+    .into_iter()
+    .map(SayukiRenderElement::Surface)
+    .collect()
 }
 
 /// Render a single window's surfaces at 1:1, positioned output-local relative to

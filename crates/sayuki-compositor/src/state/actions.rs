@@ -12,6 +12,7 @@ use smithay::{
     desktop::Window,
     output::Output,
     utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER},
+    wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
 use super::{SayukiState, set_window_size};
@@ -29,13 +30,26 @@ use crate::{
 
 impl SayukiState {
     pub(super) fn focus_window_at(&mut self, location: Point<f64, Logical>) {
+        let keyboard = self.keyboard.clone();
+        if let Some(surface) = self.exclusive_layer_focus().or_else(|| {
+            self.layer_keyboard_focus_under(location, &[WlrLayer::Overlay, WlrLayer::Top])
+        }) {
+            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            return;
+        }
+
         let Some(window) = self
             .space()
             .element_under(location)
             .map(|(window, _)| window.clone())
         else {
-            let keyboard = self.keyboard.clone();
-            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+            if let Some(surface) =
+                self.layer_keyboard_focus_under(location, &[WlrLayer::Bottom, WlrLayer::Background])
+            {
+                keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            } else {
+                keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+            }
             return;
         };
 

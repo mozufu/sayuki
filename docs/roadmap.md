@@ -124,7 +124,7 @@ protocols. Build both.
 See `docs/milestone-6-desktop-protocols.md` for the detailed spec (priority
 tiers, the layer-shell work-area contract, and Smithay handler mapping).
 
-Tier 0 — shell foundation:
+Tier 0 — shell foundation (✅ complete in `crates/sayuki-compositor`):
 
 - layer shell for panels, backgrounds, notifications, launchers, lock surfaces
 - `xdg-output`

@@ -3,8 +3,9 @@ use std::{error::Error, sync::Arc, time::Duration};
 use calloop::EventLoop;
 use clap::Parser;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell, reexports::wayland_server::Display, wayland::socket::ListeningSocketSource,
+    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_shell, reexports::wayland_server::Display,
+    wayland::socket::ListeningSocketSource,
 };
 use tracing::{debug, error, info};
 
@@ -89,6 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 delegate_compositor!(SayukiState);
 delegate_data_device!(SayukiState);
+delegate_layer_shell!(SayukiState);
 delegate_output!(SayukiState);
 delegate_seat!(SayukiState);
 delegate_shm!(SayukiState);
