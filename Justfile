@@ -42,8 +42,9 @@ flake-check:
 test-compositor *args:
     cargo run -p {{compositor}} -- {{args}}
 
-# Backwards-compatible shorthand for manual compositor testing.
-alias run := test-compositor
+# Run the compositor on real hardware/TTY via the udev backend.
+run *args:
+    cargo run -p {{compositor}} -- --backend udev {{args}}
 
 # Remove build artifacts.
 clean:
