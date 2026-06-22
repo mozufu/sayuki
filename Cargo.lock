@@ -1601,6 +1601,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayuki-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "sayuki-core"
+version = "0.1.0"
+
+[[package]]
+name = "sayuki-input"
+version = "0.1.0"
+
+[[package]]
+name = "sayuki-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "sayuki-render"
+version = "0.1.0"
+
+[[package]]
+name = "sayuki-wm"
+version = "0.1.0"
+
+[[package]]
+name = "sayukictl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "sayuki-ipc",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
