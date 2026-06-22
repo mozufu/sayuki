@@ -14,11 +14,20 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        foreign_toplevel_list::{ForeignToplevelListHandler, ForeignToplevelListState},
         output::OutputHandler,
         selection::{
             SelectionHandler,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
+            ext_data_control::{
+                DataControlHandler as ExtDataControlHandler,
+                DataControlState as ExtDataControlState,
+            },
+            wlr_data_control::{
+                DataControlHandler as WlrDataControlHandler,
+                DataControlState as WlrDataControlState,
             },
         },
         shell::{
@@ -279,6 +288,24 @@ impl SelectionHandler for SayukiState {
 impl DataDeviceHandler for SayukiState {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl WlrDataControlHandler for SayukiState {
+    fn data_control_state(&self) -> &WlrDataControlState {
+        &self.wlr_data_control_state
+    }
+}
+
+impl ExtDataControlHandler for SayukiState {
+    fn data_control_state(&self) -> &ExtDataControlState {
+        &self.ext_data_control_state
+    }
+}
+
+impl ForeignToplevelListHandler for SayukiState {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list
     }
 }
 

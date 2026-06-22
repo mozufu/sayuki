@@ -40,8 +40,13 @@ use smithay::{
     utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorState, with_states},
+        foreign_toplevel_list::ForeignToplevelListState,
         output::OutputManagerState,
-        selection::data_device::DataDeviceState,
+        selection::{
+            data_device::DataDeviceState,
+            ext_data_control::DataControlState as ExtDataControlState,
+            wlr_data_control::DataControlState as WlrDataControlState,
+        },
         shell::{
             wlr_layer::{
                 KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
@@ -79,6 +84,9 @@ pub(crate) struct SayukiState {
     pub(crate) layer_shell_state: WlrLayerShellState,
     pub(crate) shm_state: ShmState,
     pub(crate) data_device_state: DataDeviceState,
+    pub(crate) wlr_data_control_state: WlrDataControlState,
+    pub(crate) ext_data_control_state: ExtDataControlState,
+    pub(crate) foreign_toplevel_list: ForeignToplevelListState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) wm: WindowManager,
     pub(crate) popups: PopupManager,
@@ -119,6 +127,11 @@ impl SayukiState {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        let wlr_data_control_state =
+            WlrDataControlState::new::<Self, _>(&display_handle, None, |_| true);
+        let ext_data_control_state =
+            ExtDataControlState::new::<Self, _>(&display_handle, None, |_| true);
+        let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&display_handle);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
@@ -156,6 +169,9 @@ impl SayukiState {
             layer_shell_state,
             shm_state,
             data_device_state,
+            wlr_data_control_state,
+            ext_data_control_state,
+            foreign_toplevel_list,
             seat_state,
             wm,
             popups: PopupManager::default(),
@@ -455,6 +471,7 @@ impl SayukiState {
         // app_id/title are not set yet at role creation; place on the active
         // canvas now and defer window-rule routing to the first buffered commit.
         let window = Window::new_wayland_window(surface);
+        self.register_foreign_toplevel(&window);
         self.place_window(window.clone());
         self.focus_window(window.clone());
         self.pending_rules.push(window);
@@ -464,6 +481,7 @@ impl SayukiState {
         let Some(window) = self.window_for_toplevel_surface(surface) else {
             return;
         };
+        self.unregister_foreign_toplevel(&window);
         self.pending_rules.retain(|pending| pending != &window);
         if self.wm.remove_window(&window) {
             let focus = self.wm.active().focused().cloned();
@@ -499,6 +517,7 @@ impl SayukiState {
     pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
         if let Some(window) = self.window_for_toplevel_surface(surface) {
             window.on_commit();
+            self.refresh_foreign_toplevel(&window);
             self.route_pending_window(&window, surface);
         } else if let Some(window) = self.window_for_surface(surface) {
             window.on_commit();

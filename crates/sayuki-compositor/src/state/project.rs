@@ -11,7 +11,10 @@ use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
     desktop::Window,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
+    wayland::{
+        compositor::with_states, foreign_toplevel_list::ForeignToplevelHandle,
+        shell::xdg::XdgToplevelSurfaceData,
+    },
 };
 use tracing::{debug, warn};
 
@@ -113,6 +116,50 @@ impl SayukiState {
         if was_active_focus {
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
+        }
+    }
+
+    /// Announce a freshly mapped toplevel to `ext-foreign-toplevel-list`
+    /// (taskbars/docks). app_id/title are not known yet at map time; they are
+    /// filled in by [`Self::refresh_foreign_toplevel`] on the first commits. The
+    /// handle lives in the window's user data so it survives canvas rerouting and
+    /// is closed only on real destruction.
+    pub(super) fn register_foreign_toplevel(&mut self, window: &Window) {
+        let handle = self
+            .foreign_toplevel_list
+            .new_toplevel::<Self>(String::new(), String::new());
+        window.user_data().insert_if_missing(|| handle);
+    }
+
+    /// Push the toplevel's current app_id/title to its foreign-toplevel handle,
+    /// finalizing with `done` only when something actually changed (clients are
+    /// notified per real change, not per commit).
+    pub(super) fn refresh_foreign_toplevel(&self, window: &Window) {
+        let Some(handle) = window.user_data().get::<ForeignToplevelHandle>() else {
+            return;
+        };
+        let (app_id, title) = window_identity(window);
+        let app_id = app_id.unwrap_or_default();
+        let title = title.unwrap_or_default();
+
+        let mut changed = false;
+        if handle.app_id() != app_id {
+            handle.send_app_id(&app_id);
+            changed = true;
+        }
+        if handle.title() != title {
+            handle.send_title(&title);
+            changed = true;
+        }
+        if changed {
+            handle.send_done();
+        }
+    }
+
+    /// Close the window's foreign-toplevel handle when the toplevel is destroyed.
+    pub(super) fn unregister_foreign_toplevel(&mut self, window: &Window) {
+        if let Some(handle) = window.user_data().get::<ForeignToplevelHandle>().cloned() {
+            self.foreign_toplevel_list.remove_toplevel(&handle);
         }
     }
 }
