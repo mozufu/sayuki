@@ -129,11 +129,15 @@ Tier 0 — shell foundation (✅ complete in `crates/sayuki-compositor`):
 - layer shell for panels, backgrounds, notifications, launchers, lock surfaces
 - `xdg-output`
 
-Tier 1 — ecosystem interop:
+Tier 1 — ecosystem interop (partially complete in `crates/sayuki-compositor`):
 
-- foreign-toplevel for external taskbars
-- data device and clipboard (data-control), beyond the existing basic plumbing
-- screencopy for screenshots and screencast
+- [x] `ext-foreign-toplevel-list` — external taskbars/docks enumerate windows
+- [x] `wlr-data-control` + `ext-data-control` clipboard for managers
+  (`wl-clipboard`, `cliphist`), beyond the existing basic data-device plumbing
+- foreign-toplevel **management** (external activate/close/fullscreen) — deferred:
+  no Smithay 0.7 handler, needs custom protocol glue
+- screencopy / image-copy-capture for screenshots and screencast — deferred:
+  no Smithay 0.7 handler, needs render-to-buffer glue for both backends
 
 Tier 2 — session and security:
 
