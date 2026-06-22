@@ -198,7 +198,10 @@ mod tests {
     #[test]
     fn text_rects_emit_pixels_for_known_glyphs() {
         let rects = text_rects("A/", Point::from((10, 20))).collect::<Vec<_>>();
+        // 'A': filled cell at glyph col1,row0 -> base x 10 + 1.
         assert!(rects.iter().any(|rect| rect.loc == Point::from((11, 20))));
-        assert!(rects.iter().any(|rect| rect.loc == Point::from((16, 20))));
+        // '/': leftmost cell sits at the bottom (col0,row5), offset by one
+        // CHAR_WIDTH (x 16) — proves per-character horizontal advance.
+        assert!(rects.iter().any(|rect| rect.loc == Point::from((16, 25))));
     }
 }
