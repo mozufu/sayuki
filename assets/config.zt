@@ -1,0 +1,132 @@
+-- Sayuki default system configuration.
+-- Installed to /etc/sayuki/config.zt.
+--
+-- This file is the fallback when no user config is found.  To customise,
+-- create ~/.config/sayuki/config.zt as a standalone .zt file whose final
+-- expression is the config record you want.
+--
+-- Action variants (use in keybindings):
+--   #quit  #begin_move  #toggle_overview  #toggle_minimap
+--   #toggle_pin  #focus_next  #focus_prev  #toggle_help
+--   #spawn             { command : Text }       -- sh -c shell string
+--   #spawn_args        { args : List Text }     -- explicit argv
+--   #begin_resize      { edges : Text }         -- e.g. "bottom-right"
+--   #switch_workspace_index  { n : Int }
+--   #switch_workspace_name   { name : Text }
+--   #move_to_workspace_index { n : Int }
+--   #move_to_workspace_name  { name : Text }
+--   #pan               { dx : Int; dy : Int }
+--   #zoom              { factor : Float }       -- factor > 0
+--   #swap_window       { target : Text }
+--
+-- pan.couple: #independent or #linked
+
+-- type declarations
+
+Action :: type {
+  #quit;
+  #begin_move;
+  #toggle_overview;
+  #toggle_minimap;
+  #toggle_pin;
+  #focus_next;
+  #focus_prev;
+  #toggle_help;
+  #spawn:                  { command : Text; };
+  #spawn_args:             { args : List Text; };
+  #begin_resize:           { edges : Text; };
+  #switch_workspace_index: { n : Int; };
+  #switch_workspace_name:  { name : Text; };
+  #move_to_workspace_index: { n : Int; };
+  #move_to_workspace_name: { name : Text; };
+  #pan:                    { dx : Int; dy : Int; };
+  #zoom:                   { factor : Float; };
+  #swap_window:            { target : Text; };
+}
+
+Keybinding :: type {
+  keys   : Text;
+  action : Action;
+}
+
+Project :: type {
+  name : Text;
+  path : Text;
+}
+
+Output :: type {
+  name       : Text;
+  scale?     : Int;
+  transform? : Text;
+}
+
+-- typed list bindings (annotation required for empty lists and heterogeneous records)
+
+default_keybindings :: List Keybinding = [
+  { keys = "Alt+Enter";         action = #spawn { command = "ghostty"; }; };
+  { keys = "Alt+Shift+Q";       action = #quit; };
+  { keys = "Super+Shift+Slash"; action = #toggle_help; };
+
+  -- workspace switching (numeric index)
+  { keys = "Alt+1"; action = #switch_workspace_index { n = 1; }; };
+  { keys = "Alt+2"; action = #switch_workspace_index { n = 2; }; };
+  { keys = "Alt+3"; action = #switch_workspace_index { n = 3; }; };
+  { keys = "Alt+4"; action = #switch_workspace_index { n = 4; }; };
+
+  -- move focused window to workspace
+  { keys = "Alt+Shift+1"; action = #move_to_workspace_index { n = 1; }; };
+  { keys = "Alt+Shift+2"; action = #move_to_workspace_index { n = 2; }; };
+  { keys = "Alt+Shift+3"; action = #move_to_workspace_index { n = 3; }; };
+  { keys = "Alt+Shift+4"; action = #move_to_workspace_index { n = 4; }; };
+
+  -- canvas pan (200 px steps)
+  { keys = "Alt+Left";  action = #pan { dx = -200; dy = 0; }; };
+  { keys = "Alt+Right"; action = #pan { dx = 200;  dy = 0; }; };
+  { keys = "Alt+Up";    action = #pan { dx = 0;    dy = -200; }; };
+  { keys = "Alt+Down";  action = #pan { dx = 0;    dy = 200; }; };
+
+  -- viewport zoom
+  { keys = "Alt+Equal"; action = #zoom { factor = 1.1; }; };
+  { keys = "Alt+Minus"; action = #zoom { factor = 0.9; }; };
+
+  -- view controls
+  { keys = "Alt+O";         action = #toggle_overview; };
+  { keys = "Alt+M";         action = #toggle_minimap; };
+  { keys = "Alt+P";         action = #toggle_pin; };
+  { keys = "Alt+Tab";       action = #focus_next; };
+  { keys = "Alt+Shift+Tab"; action = #focus_prev; };
+]
+
+default_projects :: List Project = []
+
+default_outputs :: List Output = []
+
+-- final config record
+
+{
+  keyboard = {
+    rules        = "";
+    model        = "";
+    layout       = "";
+    variant      = "";
+    repeat_delay = 500;
+    repeat_rate  = 25;
+  };
+
+  keybindings = default_keybindings;
+
+  pan = {
+    couple = #independent;
+  };
+
+  snap = {
+    threshold  = 16;
+    grid       = 0;
+    to_windows = true;
+    to_edges   = true;
+  };
+
+  project = default_projects;
+
+  output = default_outputs;
+}
