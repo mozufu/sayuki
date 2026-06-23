@@ -16,6 +16,7 @@ pub(crate) struct SpawnContext<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct ActionRunner {
     wayland_display: Option<String>,
+    ipc_socket: Option<String>,
     direnv_available: bool,
     children: Vec<Child>,
 }
@@ -32,12 +33,17 @@ impl ActionRunner {
         self.wayland_display = Some(wayland_display);
     }
 
+    pub(crate) fn set_ipc_socket(&mut self, ipc_socket: String) {
+        self.ipc_socket = Some(ipc_socket);
+    }
+
     pub(crate) fn spawn(&mut self, argv: &[String], context: SpawnContext<'_>) {
         let Some(mut command) = build_command(
             argv,
             context,
             self.direnv_available,
             self.wayland_display.as_deref(),
+            self.ipc_socket.as_deref(),
         ) else {
             warn!("ignored empty spawn action");
             return;
@@ -70,13 +76,15 @@ impl ActionRunner {
 /// Build the command for `argv`. With a project `cwd` and direnv available, wrap
 /// in `direnv exec <dir> …` so the child inherits the project `.envrc`; with the
 /// cwd but no direnv, run the program directly in `dir`; with neither, run it as
-/// before. Env precedence is inherited → canvas overlay → fixed Wayland vars, so
-/// the overlay can never drop `WAYLAND_DISPLAY`. Returns `None` for empty argv.
+/// before. Env precedence is inherited → canvas overlay → fixed compositor vars,
+/// so the overlay can never drop `WAYLAND_DISPLAY` or `SAYUKI_SOCKET`. Returns
+/// `None` for empty argv.
 fn build_command(
     argv: &[String],
     context: SpawnContext<'_>,
     direnv_available: bool,
     wayland_display: Option<&str>,
+    ipc_socket: Option<&str>,
 ) -> Option<Command> {
     let (program, rest) = argv.split_first()?;
 
@@ -109,6 +117,9 @@ fn build_command(
     command.env("GDK_BACKEND", "wayland").env_remove("DISPLAY");
     if let Some(wayland_display) = wayland_display {
         command.env("WAYLAND_DISPLAY", wayland_display);
+    }
+    if let Some(ipc_socket) = ipc_socket {
+        command.env(crate::ipc::SOCKET_ENV, ipc_socket);
     }
 
     Some(command)
@@ -154,8 +165,14 @@ mod tests {
             cwd: Some(Path::new("/p")),
             env: &[],
         };
-        let command =
-            build_command(&["ghostty".to_owned()], context, true, Some("wayland-1")).expect("cmd");
+        let command = build_command(
+            &["ghostty".to_owned()],
+            context,
+            true,
+            Some("wayland-1"),
+            None,
+        )
+        .expect("cmd");
         assert_eq!(command.get_program(), OsStr::new("direnv"));
         assert_eq!(args(&command), ["exec", "/p", "ghostty"]);
         assert_eq!(command.get_current_dir(), Some(Path::new("/p")));
@@ -167,8 +184,14 @@ mod tests {
             cwd: Some(Path::new("/p")),
             env: &[],
         };
-        let command =
-            build_command(&["ghostty".to_owned()], context, false, Some("wayland-1")).expect("cmd");
+        let command = build_command(
+            &["ghostty".to_owned()],
+            context,
+            false,
+            Some("wayland-1"),
+            None,
+        )
+        .expect("cmd");
         assert_eq!(command.get_program(), OsStr::new("ghostty"));
         assert!(args(&command).is_empty());
         assert_eq!(command.get_current_dir(), Some(Path::new("/p")));
@@ -181,6 +204,7 @@ mod tests {
             SpawnContext::default(),
             true,
             None,
+            None,
         )
         .expect("cmd");
         assert_eq!(command.get_program(), OsStr::new("ghostty"));
@@ -192,19 +216,30 @@ mod tests {
     fn env_overlay_never_drops_wayland_display() {
         let overlay = vec![
             ("WAYLAND_DISPLAY".to_owned(), "stale".to_owned()),
+            ("SAYUKI_SOCKET".to_owned(), "stale".to_owned()),
             ("RUST_LOG".to_owned(), "debug".to_owned()),
         ];
         let context = SpawnContext {
             cwd: None,
             env: &overlay,
         };
-        let command =
-            build_command(&["ghostty".to_owned()], context, false, Some("wayland-1")).expect("cmd");
+        let command = build_command(
+            &["ghostty".to_owned()],
+            context,
+            false,
+            Some("wayland-1"),
+            Some("/tmp/sayuki.sock"),
+        )
+        .expect("cmd");
         let envs = envs(&command);
         // The fixed Wayland var is applied after the overlay, so it wins.
         assert_eq!(
             envs.get("WAYLAND_DISPLAY").map(String::as_str),
             Some("wayland-1")
+        );
+        assert_eq!(
+            envs.get("SAYUKI_SOCKET").map(String::as_str),
+            Some("/tmp/sayuki.sock")
         );
         assert_eq!(envs.get("RUST_LOG").map(String::as_str), Some("debug"));
         assert_eq!(envs.get("GDK_BACKEND").map(String::as_str), Some("wayland"));
@@ -212,6 +247,6 @@ mod tests {
 
     #[test]
     fn empty_argv_builds_no_command() {
-        assert!(build_command(&[], SpawnContext::default(), true, None).is_none());
+        assert!(build_command(&[], SpawnContext::default(), true, None, None).is_none());
     }
 }

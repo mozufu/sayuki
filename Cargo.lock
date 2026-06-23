@@ -1591,6 +1591,7 @@ dependencies = [
  "bitflags 2.11.1",
  "calloop 0.14.4",
  "clap",
+ "sayuki-ipc",
  "serde",
  "smithay",
  "smithay-drm-extras",
@@ -1620,6 +1621,7 @@ name = "sayuki-ipc"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1636,6 +1638,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "sayuki-ipc",
+ "serde_json",
 ]
 
 [[package]]

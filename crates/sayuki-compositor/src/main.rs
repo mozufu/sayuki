@@ -1,6 +1,6 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
-use calloop::EventLoop;
+use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
 use clap::Parser;
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
@@ -29,6 +29,7 @@ mod cli;
 mod config;
 mod grabs;
 mod input;
+mod ipc;
 mod logging;
 mod output;
 mod project;
@@ -69,6 +70,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         None => ListeningSocketSource::new_auto()?,
     };
     let socket_name = socket_source.socket_name().to_string_lossy().into_owned();
+    let (ipc_socket_path, ipc_listener) = ipc::bind_listener(&socket_name)?;
+
+    loop_handle.insert_source(
+        Generic::new(ipc_listener, Interest::READ, Mode::Level),
+        |_, listener, state| {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        if let Err(error) = stream.set_nonblocking(true) {
+                            error!(?error, "failed to make IPC client nonblocking");
+                            continue;
+                        }
+                        if let Err(error) = state.register_ipc_connection(stream) {
+                            error!(?error, "failed to register IPC client");
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Ok(PostAction::Continue);
+                    }
+                    Err(error) => error!(?error, "failed to accept IPC client"),
+                }
+            }
+        },
+    )?;
 
     let mut client_display_handle = display.handle();
     loop_handle.insert_source(socket_source, move |client_stream, _, _state| {
@@ -79,9 +104,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     state.set_wayland_display(socket_name.clone());
+    state.set_ipc_socket(ipc_socket_path.to_string_lossy().into_owned());
 
-    info!(socket = %socket_name, "Sayuki is listening for Wayland clients");
-    println!("Sayuki is running. Start clients with WAYLAND_DISPLAY={socket_name}");
+    info!(
+        wayland_display = %socket_name,
+        sayuki_socket = %ipc_socket_path.display(),
+        "Sayuki is listening for Wayland and IPC clients"
+    );
+    println!(
+        "Sayuki is running. Start clients with WAYLAND_DISPLAY={socket_name}; SAYUKI_SOCKET={}",
+        ipc_socket_path.display()
+    );
 
     while state.running {
         event_loop.dispatch(Some(FRAME_INTERVAL), &mut state)?;

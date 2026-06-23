@@ -3,7 +3,9 @@ use smithay::{
     input::keyboard::{FilterResult, Keycode, Keysym, ModifiersState, xkb},
 };
 
-use crate::{config::KeybindingConfig, input::actions::CompositorAction};
+use sayuki_ipc::Action;
+
+use crate::{config::KeybindingConfig, input::actions::action_from_config};
 
 #[derive(Clone, Debug)]
 pub(crate) struct KeybindingRegistry {
@@ -14,7 +16,7 @@ pub(crate) struct KeybindingRegistry {
 #[derive(Clone, Debug)]
 struct Keybinding {
     combo: KeyCombo,
-    action: CompositorAction,
+    action: Action,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,7 +41,7 @@ impl KeybindingRegistry {
             .map(|config| {
                 Ok(Keybinding {
                     combo: KeyCombo::parse(&config.keys)?,
-                    action: CompositorAction::from_config(&config.action)?,
+                    action: action_from_config(&config.action)?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -50,7 +52,7 @@ impl KeybindingRegistry {
         })
     }
 
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &CompositorAction)> {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &Action)> {
         self.bindings
             .iter()
             .map(|binding| (binding.combo.label.as_str(), &binding.action))
@@ -62,9 +64,9 @@ impl KeybindingRegistry {
         state: KeyState,
         modifiers: &ModifiersState,
         keysym: Keysym,
-    ) -> FilterResult<CompositorAction> {
+    ) -> FilterResult<Action> {
         if state == KeyState::Released && self.unsuppress_key(keycode) {
-            return FilterResult::Intercept(CompositorAction::None);
+            return FilterResult::Intercept(Action::Noop);
         }
 
         if state != KeyState::Pressed {
@@ -84,7 +86,7 @@ impl KeybindingRegistry {
         let action = if first_press {
             binding_action
         } else {
-            CompositorAction::None
+            Action::Noop
         };
 
         FilterResult::Intercept(action)
