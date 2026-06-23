@@ -104,14 +104,14 @@ See `docs/milestone-5-window-manager-model.md` for the detailed spec, split into
 - snap-on-drag and window swap
 - navigation: zoom, overview (fit-all), minimap
 
-5b — project session layer (✅ complete in `crates/sayuki-compositor`; tiling deferred):
+5b — project session layer (✅ complete in `crates/sayuki-compositor`):
 
 - project context per canvas: working directory, env overlay, lifecycle hooks
 - direnv integration for spawned processes (`direnv exec`, non-interactive)
 - `.sayuki` project files plus central `[[project]]` config, with a trust gate
 - window rules
 - per-output scale and transform policy
-- tiling layouts (deferred; snap/swap is the floating-first substitute)
+- tiling layouts (deferred to milestone 8)
 
 ### 6. Desktop protocols and polish
 
@@ -129,15 +129,13 @@ Tier 0 — shell foundation (✅ complete in `crates/sayuki-compositor`):
 - layer shell for panels, backgrounds, notifications, launchers, lock surfaces
 - `xdg-output`
 
-Tier 1 — ecosystem interop (partially complete in `crates/sayuki-compositor`):
+Tier 1 — ecosystem interop (✅ complete in `crates/sayuki-compositor`):
 
 - [x] `ext-foreign-toplevel-list` — external taskbars/docks enumerate windows
 - [x] `wlr-data-control` + `ext-data-control` clipboard for managers
   (`wl-clipboard`, `cliphist`), beyond the existing basic data-device plumbing
-- foreign-toplevel **management** (external activate/close/fullscreen) — deferred:
-  no Smithay 0.7 handler, needs custom protocol glue
-- screencopy / image-copy-capture for screenshots and screencast — deferred:
-  no Smithay 0.7 handler, needs render-to-buffer glue for both backends
+- foreign-toplevel **management** and screencopy / image-copy-capture deferred
+  to milestone 8
 
 Tier 2 — session and security (✅ complete in `crates/sayuki-compositor`):
 
@@ -158,8 +156,6 @@ Tier 4 — visual polish (✅ complete in `crates/sayuki-compositor`):
 - [x] fractional scale and viewporter
 - [x] presentation time
 - [x] primary selection
-
-Far: XWayland; xdg-desktop-portal backend (screencast via PipeWire).
 
 ### 7. Configuration and IPC
 
@@ -186,7 +182,41 @@ matrix).
   directory; a background thread delivers triggers via `calloop::channel`; on success all live
   config is swapped (keyboard XKB + repeat, keybindings, pan/snap policy, output policies);
   on error the compositor keeps running with the previous config unchanged
-- [ ] subscribable event stream
+- subscribable event stream (deferred to milestone 8)
+
+Status: complete except for the event stream, which moves to milestone 8.
+
+### 8. Deferred completions
+
+Items carried forward from earlier milestones where the prerequisite (Smithay
+protocol handler, render-to-buffer glue, or design clarity) was not yet in place.
+Implement in dependency order: event stream first (unblocks live panels), then
+screencopy (unblocks `grim` and the xdg-desktop-portal path), then
+foreign-toplevel management and tiling.
+
+- [ ] **Subscribable event stream** (from M7) — `Subscribe(Vec<EventKind>)`
+  request upgrades a connection to an event stream; compositor emits
+  `Event::Window*`, `Event::Workspace*`, `Event::Output*`, `Event::Config*` as
+  side effects of state mutations; backpressure: slow subscriber is dropped;
+  events serialized once and shared across all subscribers.
+- [ ] **Screencopy / image-copy-capture** (from M6 Tier 1) — render-to-buffer
+  glue for both the nested and udev backends; verify current Smithay 0.7 support;
+  target: `grim` captures the screen; foundation for the xdg-desktop-portal
+  ScreenCast backend.
+- [ ] **Foreign-toplevel management** (from M6 Tier 1) — external
+  activate/close/fullscreen via `wlr-foreign-toplevel-management`; verify
+  Smithay 0.7 handler availability; fall back to custom protocol glue in
+  `sayuki-protocols` if needed; target: a taskbar or `waybar` window control
+  module can raise and close windows.
+- [ ] **Tiling layouts** (from M5b) — first-class tiling alongside the floating
+  canvas model; snap/swap remains the floating-first default; tiling is
+  opt-in per workspace or via window rules; reference `niri`'s column layout and
+  `river`'s layout protocol for the policy shape.
+
+Far: XWayland (legacy X11 apps; large integration; defer until native clients are
+solid); xdg-desktop-portal backend (`xdg-desktop-portal-sayuki` — separate DBus
+service implementing ScreenCast via PipeWire, Screenshot, Settings,
+GlobalShortcuts; builds on M8 screencopy).
 
 ## Reference-first development policy
 
