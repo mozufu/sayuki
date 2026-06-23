@@ -3,9 +3,14 @@ use std::{error::Error, sync::Arc, time::Duration};
 use calloop::EventLoop;
 use clap::Parser;
 use smithay::{
-    delegate_compositor, delegate_data_control, delegate_data_device, delegate_ext_data_control,
-    delegate_foreign_toplevel_list, delegate_layer_shell, delegate_output, delegate_seat,
-    delegate_shm, delegate_xdg_shell, reexports::wayland_server::Display,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
+    delegate_ext_data_control, delegate_foreign_toplevel_list, delegate_fractional_scale,
+    delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager,
+    delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat,
+    delegate_security_context, delegate_session_lock, delegate_shm, delegate_text_input_manager,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_xdg_decoration, delegate_xdg_shell, reexports::wayland_server::Display,
     wayland::socket::ListeningSocketSource,
 };
 use tracing::{debug, error, info};
@@ -57,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &loop_handle,
         )?),
     };
-    let mut state = SayukiState::new(&display, config, backend)?;
+    let mut state = SayukiState::new(&display, config, backend, loop_handle.clone())?;
 
     let socket_source = match args.socket.as_deref() {
         Some(socket_name) => ListeningSocketSource::with_name(socket_name)?,
@@ -99,3 +104,19 @@ delegate_output!(SayukiState);
 delegate_seat!(SayukiState);
 delegate_shm!(SayukiState);
 delegate_xdg_shell!(SayukiState);
+delegate_cursor_shape!(SayukiState);
+delegate_fractional_scale!(SayukiState);
+delegate_idle_inhibit!(SayukiState);
+delegate_idle_notify!(SayukiState);
+delegate_input_method_manager!(SayukiState);
+delegate_pointer_constraints!(SayukiState);
+delegate_presentation!(SayukiState);
+delegate_primary_selection!(SayukiState);
+delegate_relative_pointer!(SayukiState);
+delegate_security_context!(SayukiState);
+delegate_session_lock!(SayukiState);
+delegate_text_input_manager!(SayukiState);
+delegate_viewporter!(SayukiState);
+delegate_virtual_keyboard_manager!(SayukiState);
+delegate_xdg_activation!(SayukiState);
+delegate_xdg_decoration!(SayukiState);

@@ -27,7 +27,7 @@ use smithay::{
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     render_elements,
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
-    wayland::shell::wlr_layer::Layer as WlrLayer,
+    wayland::{session_lock::LockSurface, shell::wlr_layer::Layer as WlrLayer},
 };
 
 use crate::wm::{
@@ -77,6 +77,8 @@ pub(crate) fn output_elements<R>(
     output: &Output,
     cursor: Option<CursorRender<'_>>,
     help_menu: Option<&help::HelpMenu>,
+    lock_surfaces: &[(LockSurface, Output)],
+    locked: bool,
 ) -> Vec<SayukiRenderElement<R>>
 where
     R: Renderer + ImportAll,
@@ -113,6 +115,30 @@ where
             .into_iter()
             .map(SayukiRenderElement::Surface),
         );
+    }
+    let mut drew_lock_surface = false;
+    for (lock_surface, lock_output) in lock_surfaces {
+        if lock_output == output {
+            drew_lock_surface = true;
+            elements.extend(
+                render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
+                    renderer,
+                    lock_surface.wl_surface(),
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(SayukiRenderElement::Surface),
+            );
+        }
+    }
+    if locked && !drew_lock_surface {
+        elements.push(SayukiRenderElement::Solid(solid(
+            Rectangle::from_size(output_size),
+            [0.0, 0.0, 0.0, 1.0],
+        )));
     }
     if let Some(help_menu) = help_menu {
         help_elements(help_menu, output_size, &mut elements);

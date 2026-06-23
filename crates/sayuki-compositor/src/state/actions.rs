@@ -31,6 +31,11 @@ use crate::{
 impl SayukiState {
     pub(super) fn focus_window_at(&mut self, location: Point<f64, Logical>) {
         let keyboard = self.keyboard.clone();
+        if self.is_locked() {
+            let surface = self.lock_surface_under(location);
+            keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+            return;
+        }
         if let Some(surface) = self.exclusive_layer_focus().or_else(|| {
             self.layer_keyboard_focus_under(location, &[WlrLayer::Overlay, WlrLayer::Top])
         }) {
@@ -58,14 +63,14 @@ impl SayukiState {
 
     /// Focus `window`: move it to the MRU tail, raise it, reveal it if it is
     /// off-screen, and hand it keyboard focus.
-    pub(super) fn focus_window(&mut self, window: Window) {
+    pub(crate) fn focus_window(&mut self, window: Window) {
         self.wm.active_mut().focus(window.clone());
         self.apply_focus(Some(window));
     }
 
     /// Apply focus effects (raise + reveal + keyboard) for an already-selected
     /// window, or clear focus when `None`.
-    pub(super) fn apply_focus(&mut self, window: Option<Window>) {
+    pub(crate) fn apply_focus(&mut self, window: Option<Window>) {
         let keyboard = self.keyboard.clone();
         let serial = SERIAL_COUNTER.next_serial();
         match window {

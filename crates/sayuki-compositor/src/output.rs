@@ -1,7 +1,9 @@
 use smithay::{
+    desktop::{Space, Window},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::DisplayHandle,
     utils::{Physical, Size, Transform},
+    wayland::seat::WaylandFocus,
 };
 
 use crate::state::SayukiState;
@@ -51,6 +53,24 @@ pub(crate) fn resolve_policy(policies: &[OutputPolicy], output_name: &str) -> (i
 pub(crate) fn apply_policy(output: &Output, policies: &[OutputPolicy]) {
     let (scale, transform) = resolve_policy(policies, &output.name());
     output.change_current_state(None, Some(transform), Some(Scale::Integer(scale)), None);
+}
+
+pub(crate) fn notify_fractional_scale(output: &Output, space: &Space<Window>) {
+    use smithay::wayland::{compositor::with_states, fractional_scale::with_fractional_scale};
+
+    let scale = output.current_scale().fractional_scale();
+    for window in space.elements() {
+        let outputs = space.outputs_for_element(window);
+        if outputs.iter().any(|candidate| candidate == output)
+            && let Some(surface) = window.wl_surface()
+        {
+            with_states(&surface, |states| {
+                with_fractional_scale(states, |fractional| {
+                    fractional.set_preferred_scale(scale);
+                });
+            });
+        }
+    }
 }
 
 fn parse_transform(value: &str) -> Option<Transform> {

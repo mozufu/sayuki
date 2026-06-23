@@ -28,7 +28,7 @@ use smithay::{
         keyboard::KeyboardHandle,
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus,
-            GrabStartData as PointerGrabStartData, MotionEvent, PointerHandle,
+            GrabStartData as PointerGrabStartData, MotionEvent, PointerHandle, RelativeMotionEvent,
         },
     },
     output::Output,
@@ -40,21 +40,36 @@ use smithay::{
     utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
         compositor::{CompositorState, with_states},
+        cursor_shape::CursorShapeManagerState,
         foreign_toplevel_list::ForeignToplevelListState,
+        fractional_scale::FractionalScaleManagerState,
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
+        input_method::InputMethodManagerState,
         output::OutputManagerState,
+        pointer_constraints::{PointerConstraintsState, with_pointer_constraint},
+        presentation::PresentationState,
+        relative_pointer::RelativePointerManagerState,
+        security_context::SecurityContextState,
         selection::{
             data_device::DataDeviceState,
             ext_data_control::DataControlState as ExtDataControlState,
+            primary_selection::PrimarySelectionState,
             wlr_data_control::DataControlState as WlrDataControlState,
         },
+        session_lock::{LockSurface, SessionLockManagerState},
         shell::{
             wlr_layer::{
                 KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
                 WlrLayerShellState,
             },
-            xdg::{ToplevelSurface, XdgShellState},
+            xdg::{ToplevelSurface, XdgShellState, decoration::XdgDecorationState},
         },
         shm::ShmState,
+        text_input::TextInputManagerState,
+        viewporter::ViewporterState,
+        virtual_keyboard::VirtualKeyboardManagerState,
+        xdg_activation::XdgActivationState,
     },
 };
 use tracing::{debug, info};
@@ -87,6 +102,22 @@ pub(crate) struct SayukiState {
     pub(crate) wlr_data_control_state: WlrDataControlState,
     pub(crate) ext_data_control_state: ExtDataControlState,
     pub(crate) foreign_toplevel_list: ForeignToplevelListState,
+    pub(crate) idle_notifier_state: IdleNotifierState<Self>,
+    pub(crate) _idle_inhibit_state: IdleInhibitManagerState,
+    pub(crate) session_lock_state: SessionLockManagerState,
+    pub(crate) _xdg_decoration_state: XdgDecorationState,
+    pub(crate) _fractional_scale_state: FractionalScaleManagerState,
+    pub(crate) _viewporter_state: ViewporterState,
+    pub(crate) _presentation_state: PresentationState,
+    pub(crate) primary_selection_state: PrimarySelectionState,
+    pub(crate) xdg_activation_state: XdgActivationState,
+    pub(crate) _pointer_constraints_state: PointerConstraintsState,
+    pub(crate) _input_method_state: InputMethodManagerState,
+    pub(crate) _text_input_state: TextInputManagerState,
+    pub(crate) _virtual_keyboard_state: VirtualKeyboardManagerState,
+    pub(crate) _relative_pointer_state: RelativePointerManagerState,
+    pub(crate) _cursor_shape_state: CursorShapeManagerState,
+    pub(crate) _security_context_state: SecurityContextState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) wm: WindowManager,
     pub(crate) popups: PopupManager,
@@ -95,20 +126,23 @@ pub(crate) struct SayukiState {
     help_menu: HelpMenu,
     help_visible: bool,
 
-    display_handle: DisplayHandle,
+    pub(crate) display_handle: DisplayHandle,
+    pub(crate) loop_handle: LoopHandle<'static, Self>,
     backend: BackendState,
     pending_output_global_removals: Vec<(GlobalId, Instant)>,
-    _seat: Seat<Self>,
-    keyboard: KeyboardHandle<Self>,
+    seat: Seat<Self>,
+    pub(crate) keyboard: KeyboardHandle<Self>,
     pointer: PointerHandle<Self>,
 
-    pointer_location: Point<f64, Logical>,
+    pub(crate) pointer_location: Point<f64, Logical>,
     cursor_image: CursorImageStatus,
     next_window_index: i32,
     output_policies: Vec<OutputPolicy>,
     /// Windows awaiting one-shot window-rule routing once their client has set
     /// app_id/title (which arrive after the toplevel role is created).
     pending_rules: Vec<Window>,
+    pub(crate) lock_surfaces: Vec<(LockSurface, Output)>,
+    pub(crate) locked: bool,
     start_time: Instant,
     pub(crate) running: bool,
 }
@@ -118,6 +152,7 @@ impl SayukiState {
         display: &Display<Self>,
         config: SayukiConfig,
         backend: BackendState,
+        loop_handle: LoopHandle<'static, Self>,
     ) -> Result<Self, Box<dyn Error>> {
         let display_handle = display.handle();
 
@@ -132,6 +167,25 @@ impl SayukiState {
         let ext_data_control_state =
             ExtDataControlState::new::<Self, _>(&display_handle, None, |_| true);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&display_handle);
+        let idle_notifier_state =
+            IdleNotifierState::<Self>::new(&display_handle, loop_handle.clone());
+        let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&display_handle);
+        let session_lock_state = SessionLockManagerState::new::<Self, _>(&display_handle, |_| true);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
+        let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&display_handle);
+        let viewporter_state = ViewporterState::new::<Self>(&display_handle);
+        let presentation_state = PresentationState::new::<Self>(&display_handle, 1u32);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&display_handle);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
+        let input_method_state = InputMethodManagerState::new::<Self, _>(&display_handle, |_| true);
+        let text_input_state = TextInputManagerState::new::<Self>(&display_handle);
+        let virtual_keyboard_state =
+            VirtualKeyboardManagerState::new::<Self, _>(&display_handle, |_| true);
+        let relative_pointer_state = RelativePointerManagerState::new::<Self>(&display_handle);
+        let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
+        let security_context_state =
+            SecurityContextState::new::<Self, _>(&display_handle, |_| true);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
@@ -172,6 +226,22 @@ impl SayukiState {
             wlr_data_control_state,
             ext_data_control_state,
             foreign_toplevel_list,
+            idle_notifier_state,
+            _idle_inhibit_state: idle_inhibit_state,
+            session_lock_state,
+            _xdg_decoration_state: xdg_decoration_state,
+            _fractional_scale_state: fractional_scale_state,
+            _viewporter_state: viewporter_state,
+            _presentation_state: presentation_state,
+            primary_selection_state,
+            xdg_activation_state,
+            _pointer_constraints_state: pointer_constraints_state,
+            _input_method_state: input_method_state,
+            _text_input_state: text_input_state,
+            _virtual_keyboard_state: virtual_keyboard_state,
+            _relative_pointer_state: relative_pointer_state,
+            _cursor_shape_state: cursor_shape_state,
+            _security_context_state: security_context_state,
             seat_state,
             wm,
             popups: PopupManager::default(),
@@ -180,9 +250,10 @@ impl SayukiState {
             help_menu,
             help_visible: false,
             display_handle,
+            loop_handle,
             backend,
             pending_output_global_removals: Vec::new(),
-            _seat: seat,
+            seat,
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
@@ -190,6 +261,8 @@ impl SayukiState {
             next_window_index: 0,
             output_policies,
             pending_rules: Vec::new(),
+            lock_surfaces: Vec::new(),
+            locked: false,
             start_time: Instant::now(),
             running: true,
         })
@@ -211,6 +284,17 @@ impl SayukiState {
 
     pub(crate) fn set_cursor_image(&mut self, image: CursorImageStatus) {
         self.cursor_image = image;
+    }
+
+    pub(crate) fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    pub(crate) fn lock_surface_under(&self, _location: Point<f64, Logical>) -> Option<WlSurface> {
+        self.lock_surfaces
+            .iter()
+            .find(|(surface, _)| surface.alive())
+            .map(|(surface, _)| surface.wl_surface().clone())
     }
 
     pub(crate) fn handle_winit_event(&mut self, event: WinitEvent) {
@@ -260,6 +344,8 @@ impl SayukiState {
         let keycode = event.key_code();
         let key_state = event.state();
         let keyboard = self.keyboard.clone();
+        let seat = self.seat.clone();
+        self.idle_notifier_state.notify_activity(&seat);
         let action = keyboard.input::<CompositorAction, _>(
             self,
             keycode,
@@ -310,7 +396,24 @@ impl SayukiState {
         // A physical mouse delta should move the cursor the same screen distance
         // regardless of zoom, so divide the delta by the zoom under the pointer.
         let zoom = self.pointer_zoom();
+        let seat = self.seat.clone();
+        self.idle_notifier_state.notify_activity(&seat);
         let delta = event.delta();
+        let under = self.surface_under(self.pointer_location);
+        let pointer = self.pointer.clone();
+        pointer.relative_motion(
+            self,
+            under.clone(),
+            &RelativeMotionEvent {
+                delta,
+                delta_unaccel: event.delta_unaccel(),
+                utime: event.time(),
+            },
+        );
+        if self.pointer_focus_constrained(&under) {
+            pointer.frame(self);
+            return;
+        }
         let scaled = Point::from((delta.x / zoom, delta.y / zoom));
         let location = self.clamp_pointer(self.pointer_location + scaled);
         self.pointer_location = location;
@@ -321,6 +424,8 @@ impl SayukiState {
     where
         B: InputBackend,
     {
+        let seat = self.seat.clone();
+        self.idle_notifier_state.notify_activity(&seat);
         let location = self
             .backend
             .primary_output()
@@ -352,11 +457,25 @@ impl SayukiState {
         pointer.frame(self);
     }
 
+    fn pointer_focus_constrained(&self, under: &Option<(WlSurface, Point<f64, Logical>)>) -> bool {
+        let Some((surface, _)) = under else {
+            return false;
+        };
+        with_pointer_constraint(surface, &self.pointer, |constraint| {
+            constraint
+                .as_deref()
+                .map(|constraint| constraint.is_active())
+                .unwrap_or(false)
+        })
+    }
+
     fn forward_pointer_button<B>(&mut self, event: B::PointerButtonEvent)
     where
         B: InputBackend,
     {
         let serial = SERIAL_COUNTER.next_serial();
+        let seat = self.seat.clone();
+        self.idle_notifier_state.notify_activity(&seat);
         if event.state() == ButtonState::Pressed {
             self.focus_window_at(self.pointer_location);
         }
@@ -378,6 +497,8 @@ impl SayukiState {
     where
         B: InputBackend,
     {
+        let seat = self.seat.clone();
+        self.idle_notifier_state.notify_activity(&seat);
         let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
 
         for axis in [Axis::Horizontal, Axis::Vertical] {
@@ -568,6 +689,11 @@ impl SayukiState {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if self.is_locked() {
+            return self
+                .lock_surface_under(location)
+                .map(|surface| (surface, location));
+        }
         self.layer_surface_under(location, &[WlrLayer::Overlay, WlrLayer::Top])
             .or_else(|| {
                 self.space()
@@ -619,6 +745,7 @@ impl SayukiState {
 
     pub(crate) fn refresh_space(&mut self) {
         self.space_mut().refresh();
+        self.lock_surfaces.retain(|(surface, _)| surface.alive());
         self.action_runner.reap_children();
 
         let now = Instant::now();
@@ -805,6 +932,7 @@ impl SayukiState {
             _ => None,
         };
         let help_menu = self.help_visible.then_some(&self.help_menu);
+        let locked = self.is_locked();
 
         match &mut self.backend {
             BackendState::Nested(backend) => {
@@ -823,6 +951,8 @@ impl SayukiState {
                         &output,
                         cursor,
                         help_menu,
+                        &self.lock_surfaces,
+                        locked,
                     );
                     let mut frame =
                         renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
@@ -831,10 +961,18 @@ impl SayukiState {
                     let _sync_point = frame.finish()?;
                 }
                 backend.graphics_mut().submit(Some(&[damage]))?;
+                self.discard_presentation_feedback_for_all_outputs();
                 self.send_frame_callbacks_for_all_outputs();
             }
             BackendState::Udev(backend) => {
-                backend.render(self.wm.active(), cursor, BACKGROUND, help_menu)?;
+                backend.render(
+                    self.wm.active(),
+                    cursor,
+                    BACKGROUND,
+                    help_menu,
+                    &self.lock_surfaces,
+                    locked,
+                )?;
             }
         }
 
@@ -984,6 +1122,17 @@ impl SayukiState {
                 Some(output.clone())
             });
         }
+        for (lock_surface, lock_output) in &self.lock_surfaces {
+            if lock_output == output {
+                send_frames_surface_tree(
+                    lock_surface.wl_surface(),
+                    output,
+                    time,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+        }
 
         for window in self.space().elements() {
             let outputs = self.space().outputs_for_element(window);
@@ -1019,6 +1168,17 @@ impl SayukiState {
                     Some(output.clone())
                 });
             }
+            for (lock_surface, lock_output) in &self.lock_surfaces {
+                if lock_output == &output {
+                    send_frames_surface_tree(
+                        lock_surface.wl_surface(),
+                        &output,
+                        time,
+                        Some(Duration::ZERO),
+                        |_, _| Some(output.clone()),
+                    );
+                }
+            }
         }
 
         for window in self.space().elements() {
@@ -1041,6 +1201,20 @@ impl SayukiState {
             send_frames_surface_tree(surface, &output, time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
+        }
+    }
+
+    fn discard_presentation_feedback_for_all_outputs(&self) {
+        for output in self.collect_outputs() {
+            let mut feedback = smithay::desktop::utils::OutputPresentationFeedback::new(&output);
+            for window in self.space().elements() {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(output.clone()),
+                    |_, _| smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            feedback.discarded();
         }
     }
 

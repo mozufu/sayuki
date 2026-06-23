@@ -28,6 +28,7 @@ use smithay::{
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
+    desktop::{layer_map_for_output, utils::OutputPresentationFeedback},
     output::{Output, PhysicalProperties, Scale},
     reexports::{
         drm::control::{ModeTypeFlags, connector, crtc},
@@ -35,7 +36,8 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{DisplayHandle, backend::GlobalId},
     },
-    utils::{DeviceFd, Logical, Point, Transform},
+    utils::{DeviceFd, Logical, Monotonic, Point, Transform},
+    wayland::{presentation::Refresh, session_lock::LockSurface},
 };
 use smithay_drm_extras::{
     display_info,
@@ -44,6 +46,7 @@ use smithay_drm_extras::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    output::OUTPUT_REFRESH_MHZ,
     render::{self, CursorRender},
     state::SayukiState,
     wm::{Canvas, WindowManager},
@@ -84,6 +87,7 @@ struct NativeOutput {
     drm_output: NativeDrmOutput,
     connector: connector::Handle,
     pending_frame: bool,
+    pending_feedback: Option<OutputPresentationFeedback>,
 }
 
 #[derive(Default)]
@@ -283,6 +287,32 @@ impl NativeBackend {
                 match output.drm_output.frame_submitted() {
                     Ok(_) => {
                         output.pending_frame = false;
+                        if let Some(mut feedback) = output.pending_feedback.take() {
+                            let refresh = Refresh::fixed(Duration::from_nanos(
+                                (1_000_000_000u64 * 1000) / OUTPUT_REFRESH_MHZ as u64,
+                            ));
+                            if let Some(metadata) = metadata {
+                                let time = match metadata.time {
+                                    smithay::backend::drm::DrmEventTime::Monotonic(duration) => {
+                                        duration
+                                    }
+                                    smithay::backend::drm::DrmEventTime::Realtime(system_time) => {
+                                        system_time
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                    }
+                                };
+                                feedback.presented::<_, Monotonic>(
+                                    time,
+                                    refresh,
+                                    u64::from(metadata.sequence),
+                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                        | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion,
+                                );
+                            } else {
+                                feedback.discarded();
+                            }
+                        }
                         Ok(Some(output.output.clone()))
                     }
                     Err(error) => {
@@ -307,6 +337,8 @@ impl NativeBackend {
         cursor: Option<CursorRender<'_>>,
         background: Color32F,
         help_menu: Option<&render::help::HelpMenu>,
+        lock_surfaces: &[(LockSurface, Output)],
+        locked: bool,
     ) -> Result<(), Box<dyn Error>> {
         if !self.active {
             return Ok(());
@@ -326,8 +358,15 @@ impl NativeBackend {
             if native_output.pending_frame {
                 continue;
             }
-            let elements =
-                render::output_elements(renderer, canvas, &native_output.output, cursor, help_menu);
+            let elements = render::output_elements(
+                renderer,
+                canvas,
+                &native_output.output,
+                cursor,
+                help_menu,
+                lock_surfaces,
+                locked,
+            );
 
             let render_result = native_output.drm_output.render_frame(
                 renderer,
@@ -355,6 +394,25 @@ impl NativeBackend {
             {
                 let _ = primary.sync.wait();
             }
+
+            let mut feedback = OutputPresentationFeedback::new(&native_output.output);
+            let canvas_space = canvas.space();
+            for window in canvas_space.elements() {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(native_output.output.clone()),
+                    |_, _| smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            let layer_map = layer_map_for_output(&native_output.output);
+            for layer in layer_map.layers() {
+                layer.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(native_output.output.clone()),
+                    |_, _| smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            native_output.pending_feedback = Some(feedback);
 
             match native_output.drm_output.queue_frame(()) {
                 Ok(()) => native_output.pending_frame = true,
@@ -558,6 +616,7 @@ impl NativeBackend {
             drm_output,
             connector: connector.handle(),
             pending_frame: false,
+            pending_feedback: None,
         }))
     }
 

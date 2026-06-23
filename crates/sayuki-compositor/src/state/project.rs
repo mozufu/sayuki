@@ -60,8 +60,10 @@ impl SayukiState {
     /// Idempotent: covers initial setup, hotplug, and session reactivation.
     pub(super) fn apply_output_policies(&self) {
         let policies = &self.output_policies;
-        self.backend
-            .for_each_output(|output| output::apply_policy(output, policies));
+        for output in self.collect_outputs() {
+            output::apply_policy(&output, policies);
+            output::notify_fractional_scale(&output, self.space());
+        }
     }
 
     /// Place a window directly into a project canvas (window-rule routing): it

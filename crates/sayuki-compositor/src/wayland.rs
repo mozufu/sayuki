@@ -1,21 +1,36 @@
+use std::sync::Arc;
+
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     desktop::PopupKind,
-    input::{Seat, SeatHandler, pointer::Focus},
+    input::{
+        Seat, SeatHandler,
+        pointer::{Focus, PointerHandle},
+    },
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::{
+            decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode, shell::server::xdg_toplevel,
+        },
         wayland_server::{
             Client, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::Logical,
+    utils::{Logical, Rectangle, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
         foreign_toplevel_list::{ForeignToplevelListHandler, ForeignToplevelListState},
+        fractional_scale::FractionalScaleHandler,
+        idle_inhibit::IdleInhibitHandler,
+        idle_notify::{IdleNotifierHandler, IdleNotifierState},
+        input_method::{InputMethodHandler, PopupSurface as InputMethodPopupSurface},
         output::OutputHandler,
+        pointer_constraints::{PointerConstraintsHandler, with_pointer_constraint},
+        security_context::{
+            SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
+        },
         selection::{
             SelectionHandler,
             data_device::{
@@ -25,18 +40,27 @@ use smithay::{
                 DataControlHandler as ExtDataControlHandler,
                 DataControlState as ExtDataControlState,
             },
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
             wlr_data_control::{
                 DataControlHandler as WlrDataControlHandler,
                 DataControlState as WlrDataControlState,
             },
         },
+        session_lock::{LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker},
         shell::{
             wlr_layer::{
                 Layer, LayerSurface as WlrLayerSurface, WlrLayerShellHandler, WlrLayerShellState,
             },
-            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+            xdg::{
+                PopupSurface as XdgPopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
+                XdgShellState, decoration::XdgDecorationHandler,
+            },
         },
         shm::{ShmHandler, ShmState},
+        tablet_manager::TabletSeatHandler,
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
     },
 };
 use tracing::{debug, warn};
@@ -81,7 +105,7 @@ impl XdgShellHandler for SayukiState {
         self.ensure_initial_configure(&wl_surface);
     }
 
-    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+    fn new_popup(&mut self, surface: XdgPopupSurface, positioner: PositionerState) {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
@@ -97,7 +121,7 @@ impl XdgShellHandler for SayukiState {
 
     fn reposition_request(
         &mut self,
-        surface: PopupSurface,
+        surface: XdgPopupSurface,
         positioner: PositionerState,
         token: u32,
     ) {
@@ -110,7 +134,7 @@ impl XdgShellHandler for SayukiState {
 
     fn grab(
         &mut self,
-        _surface: PopupSurface,
+        _surface: XdgPopupSurface,
         _seat: wl_seat::WlSeat,
         _serial: smithay::utils::Serial,
     ) {
@@ -308,6 +332,193 @@ impl ForeignToplevelListHandler for SayukiState {
         &mut self.foreign_toplevel_list
     }
 }
+
+impl IdleInhibitHandler for SayukiState {
+    fn inhibit(&mut self, _surface: WlSurface) {
+        self.idle_notifier_state.set_is_inhibited(true);
+    }
+
+    fn uninhibit(&mut self, _surface: WlSurface) {
+        self.idle_notifier_state.set_is_inhibited(false);
+    }
+}
+
+impl IdleNotifierHandler for SayukiState {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier_state
+    }
+}
+
+impl SessionLockHandler for SayukiState {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        self.locked = true;
+        confirmation.lock();
+    }
+
+    fn unlock(&mut self) {
+        self.locked = false;
+        self.lock_surfaces.clear();
+        let focus = self.wm.active().focused().cloned();
+        self.apply_focus(focus);
+    }
+
+    fn new_surface(
+        &mut self,
+        surface: LockSurface,
+        output: smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) {
+        let Some(output) = smithay::output::Output::from_resource(&output) else {
+            warn!("lock surface for unknown output");
+            return;
+        };
+        let size = self
+            .space()
+            .output_geometry(&output)
+            .map(|geometry| geometry.size)
+            .unwrap_or_else(|| (1920, 1080).into());
+        surface.with_pending_state(|state| {
+            state.size = Some((size.w as u32, size.h as u32).into());
+        });
+        surface.send_configure();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(
+            self,
+            Some(surface.wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+        self.lock_surfaces.push((surface, output));
+    }
+}
+
+impl XdgDecorationHandler for SayukiState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: Mode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+
+impl FractionalScaleHandler for SayukiState {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let scale = self
+            .space()
+            .output_under(self.pointer_location)
+            .next()
+            .map(|output| output.current_scale().fractional_scale())
+            .unwrap_or(1.0);
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            smithay::wayland::fractional_scale::with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+
+impl PrimarySelectionHandler for SayukiState {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl XdgActivationHandler for SayukiState {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        let _ = (token, token_data);
+        if let Some(window) = self.window_for_toplevel_surface(&surface) {
+            self.focus_window(window);
+        }
+    }
+}
+
+impl PointerConstraintsHandler for SayukiState {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        with_pointer_constraint(surface, pointer, |constraint| {
+            if let Some(constraint) = constraint {
+                constraint.activate();
+            }
+        });
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        location: smithay::utils::Point<f64, Logical>,
+    ) {
+        self.pointer_location = location;
+    }
+}
+
+impl InputMethodHandler for SayukiState {
+    fn new_popup(&mut self, surface: InputMethodPopupSurface) {
+        let _ = surface;
+    }
+
+    fn dismiss_popup(&mut self, surface: InputMethodPopupSurface) {
+        let _ = surface;
+    }
+
+    fn popup_repositioned(&mut self, surface: InputMethodPopupSurface) {
+        let _ = surface;
+    }
+
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        self.window_for_toplevel_surface(parent)
+            .and_then(|window| self.space().element_geometry(&window))
+            .unwrap_or_default()
+    }
+}
+
+impl SecurityContextHandler for SayukiState {
+    fn context_created(
+        &mut self,
+        source: SecurityContextListenerSource,
+        _context: SecurityContext,
+    ) {
+        let mut display_handle = self.display_handle.clone();
+        if let Err(error) = self
+            .loop_handle
+            .insert_source(source, move |stream, _, _state| {
+                if let Err(error) = display_handle
+                    .insert_client(stream, Arc::new(crate::wayland::ClientState::default()))
+                {
+                    warn!(?error, "failed to accept sandboxed Wayland client");
+                }
+            })
+        {
+            warn!(?error, "failed to register security context source");
+        }
+    }
+}
+
+impl TabletSeatHandler for SayukiState {}
 
 impl ClientDndGrabHandler for SayukiState {}
 impl ServerDndGrabHandler for SayukiState {}

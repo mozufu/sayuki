@@ -139,23 +139,25 @@ Tier 1 — ecosystem interop (partially complete in `crates/sayuki-compositor`):
 - screencopy / image-copy-capture for screenshots and screencast — deferred:
   no Smithay 0.7 handler, needs render-to-buffer glue for both backends
 
-Tier 2 — session and security:
+Tier 2 — session and security (✅ complete in `crates/sayuki-compositor`):
 
-- session lock
-- idle notify and idle inhibit
+- [x] session lock
+- [x] idle notify and idle inhibit
+- [x] security context (sandboxed client socket registration; enforcement deferred to M7)
 
-Tier 3 — input completeness:
+Tier 3 — input completeness (✅ complete in `crates/sayuki-compositor`):
 
-- text-input/input-method (IME) and virtual keyboard
-- pointer constraints and relative pointer
-- `xdg-activation`
+- [x] text-input/input-method (IME) and virtual keyboard
+- [x] pointer constraints and relative pointer
+- [x] cursor shape
+- [x] `xdg-activation`
 
-Tier 4 — visual polish:
+Tier 4 — visual polish (✅ complete in `crates/sayuki-compositor`):
 
-- `xdg-decoration` (server-side default, CSD opt-in)
-- fractional scale and viewporter
-- presentation time
-- primary selection
+- [x] `xdg-decoration` (server-side default, CSD opt-in)
+- [x] fractional scale and viewporter
+- [x] presentation time
+- [x] primary selection
 
 Far: XWayland; xdg-desktop-portal backend (screencast via PipeWire).
 
