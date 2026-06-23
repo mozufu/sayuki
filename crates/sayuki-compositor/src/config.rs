@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
     error::Error,
-    fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
@@ -11,7 +9,7 @@ use smithay::input::keyboard::XkbConfig;
 
 use crate::{
     output::OutputPolicy,
-    project::{HookCmd, ProjectConfig},
+    project::ProjectConfig,
     wm::{PanCouple, WorkspaceRef, snap::SnapConfig},
 };
 
@@ -84,21 +82,16 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 struct RawKeybindingConfig {
     keys: String,
-    action: String,
-    command: Option<CommandConfig>,
-    edges: Option<String>,
-    workspace: Option<RawWorkspaceRef>,
-    dx: Option<i32>,
-    dy: Option<i32>,
-    factor: Option<f64>,
-    target: Option<String>,
+    action: RawAction,
 }
 
+/// Zutai tagged-union JSON: bare atoms arrive as `"#tag"` strings; variants
+/// with payloads arrive as `{ "tag": "name", "payload": { ... } }`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum RawWorkspaceRef {
-    Index(u8),
-    Name(String),
+enum RawAction {
+    Atom(String),
+    Tagged { tag: String, payload: serde_json::Value },
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,8 +99,8 @@ struct RawProject {
     name: String,
     path: String,
     #[serde(default)]
-    env: HashMap<String, String>,
-    on_init: Option<HookCmd>,
+    env: std::collections::HashMap<String, String>,
+    on_init: Option<crate::project::HookCmd>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,19 +127,14 @@ struct RawSnapConfig {
 
 impl Default for RawSnapConfig {
     fn default() -> Self {
-        let defaults = SnapConfig::default();
-        Self {
-            threshold: defaults.threshold,
-            grid: defaults.grid,
-            to_windows: defaults.to_windows,
-            to_edges: defaults.to_edges,
-        }
+        let d = crate::wm::snap::SnapConfig::default();
+        Self { threshold: d.threshold, grid: d.grid, to_windows: d.to_windows, to_edges: d.to_edges }
     }
 }
 
 impl RawSnapConfig {
-    fn into_snap(self) -> SnapConfig {
-        SnapConfig {
+    fn into_snap(self) -> crate::wm::snap::SnapConfig {
+        crate::wm::snap::SnapConfig {
             threshold: self.threshold,
             grid: self.grid,
             to_windows: self.to_windows,
@@ -155,23 +143,44 @@ impl RawSnapConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum CommandConfig {
-    Shell(String),
-    Args(Vec<String>),
-}
-
 impl SayukiConfig {
-    pub(crate) fn load(path: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+    /// Load compositor config from the first found source:
+    /// 1. `explicit` (`--config` flag)
+    /// 2. `$XDG_CONFIG_HOME/sayuki/config.zt` (user)
+    /// 3. `/etc/sayuki/config.zt` (system)
+    ///
+    /// When no file is found, built-in defaults apply. Each layer is a `.zt`
+    /// file whose final expression is the config record; layers compose via
+    /// the language's own `import` + `overlayDeep` builtins.
+    pub(crate) fn load(explicit: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+        let path = explicit
+            .map(ToOwned::to_owned)
+            .or_else(find_user_config)
+            .or_else(find_system_config);
+
         let Some(path) = path else {
             return Ok(Self::default());
         };
 
-        let contents = fs::read_to_string(path)?;
-        let raw: RawConfig = toml::from_str(&contents)?;
+        let json = zutai_eval::eval_path_to_json(&path)?;
+        let raw: RawConfig = serde_json::from_value(json)?;
         raw.try_into_config()
     }
+}
+
+fn find_user_config() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+        });
+    let path = base.join("sayuki").join("config.zt");
+    path.exists().then_some(path)
+}
+
+fn find_system_config() -> Option<PathBuf> {
+    let path = PathBuf::from("/etc/sayuki/config.zt");
+    path.exists().then_some(path)
 }
 
 impl Default for SayukiConfig {
@@ -256,7 +265,7 @@ impl RawPanConfig {
         let Some(couple) = self.couple else {
             return Ok(PanCouple::default());
         };
-        match couple.trim().to_ascii_lowercase().as_str() {
+        match couple.trim_start_matches('#').trim().to_ascii_lowercase().as_str() {
             "independent" => Ok(PanCouple::Independent),
             "linked" => Ok(PanCouple::Linked),
             other => Err(invalid_keybinding(format!(
@@ -268,110 +277,111 @@ impl RawPanConfig {
 
 impl RawKeybindingConfig {
     fn try_into_config(self) -> Result<KeybindingConfig, io::Error> {
-        let action_name = self.action.trim().to_ascii_lowercase();
-        let action = match action_name.as_str() {
-            "quit" => BindingActionConfig::Quit,
-            "spawn" => {
-                let Some(command) = self.command else {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` uses action `spawn` without `command`",
-                        self.keys
-                    )));
-                };
-                let command = command.into_args();
-                if command.is_empty() || command.iter().any(|arg| arg.is_empty()) {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` has an empty spawn command",
-                        self.keys
-                    )));
-                }
-                BindingActionConfig::Spawn { command }
-            }
-            "move" | "begin-move" => BindingActionConfig::BeginMove,
-            "resize" | "begin-resize" => BindingActionConfig::BeginResize {
-                edges: self.edges.unwrap_or_else(|| "bottom-right".to_owned()),
-            },
-            "switch-workspace" | "workspace" => BindingActionConfig::SwitchWorkspace {
-                workspace: self.require_workspace()?,
-            },
-            "move-to-workspace" | "move-window-to-workspace" => {
-                BindingActionConfig::MoveToWorkspace {
-                    workspace: self.require_workspace()?,
-                }
-            }
-            "pan" => {
-                let dx = self.dx.unwrap_or(0);
-                let dy = self.dy.unwrap_or(0);
-                if dx == 0 && dy == 0 {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` uses action `pan` without a non-zero `dx`/`dy`",
-                        self.keys
-                    )));
-                }
-                BindingActionConfig::PanViewport { dx, dy }
-            }
-            "zoom" => {
-                let Some(factor) = self.factor else {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` uses action `zoom` without `factor`",
-                        self.keys
-                    )));
-                };
-                if !(factor.is_finite() && factor > 0.0) {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` uses a non-positive zoom `factor`",
-                        self.keys
-                    )));
-                }
-                BindingActionConfig::ZoomViewport { factor }
-            }
-            "overview" | "toggle-overview" => BindingActionConfig::ToggleOverview,
-            "minimap" | "toggle-minimap" => BindingActionConfig::ToggleMinimap,
-            "pin" | "toggle-pin" => BindingActionConfig::TogglePin,
-            "swap" | "swap-window" => {
-                let Some(target) = self.target else {
-                    return Err(invalid_keybinding(format!(
-                        "keybinding `{}` uses action `swap` without `target`",
-                        self.keys
-                    )));
-                };
-                BindingActionConfig::SwapWindow { target }
-            }
-            "focus-next" => BindingActionConfig::FocusNext,
-            "focus-prev" | "focus-previous" => BindingActionConfig::FocusPrev,
-            "help" | "toggle-help" | "keymap-help" => BindingActionConfig::ToggleHelp,
-            _ => {
-                return Err(invalid_keybinding(format!(
-                    "keybinding `{}` uses unknown action `{}`",
-                    self.keys, self.action
-                )));
-            }
-        };
-
-        Ok(KeybindingConfig {
-            keys: self.keys,
-            action,
-        })
-    }
-
-    fn require_workspace(&self) -> Result<WorkspaceRef, io::Error> {
-        self.workspace
-            .as_ref()
-            .map(RawWorkspaceRef::to_ref)
-            .ok_or_else(|| {
-                invalid_keybinding(format!(
-                    "keybinding `{}` uses action `{}` without `workspace`",
-                    self.keys, self.action
-                ))
-            })
+        let action = self.action.try_into_binding_action(&self.keys)?;
+        Ok(KeybindingConfig { keys: self.keys, action })
     }
 }
 
-impl RawWorkspaceRef {
-    fn to_ref(&self) -> WorkspaceRef {
+impl RawAction {
+    fn try_into_binding_action(self, keys: &str) -> Result<BindingActionConfig, io::Error> {
+        // Helper: pull a field from a payload object.
+        fn str_field<'a>(p: &'a serde_json::Value, field: &str, keys: &str) -> Result<&'a str, io::Error> {
+            p.get(field)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+        }
+        fn i32_field(p: &serde_json::Value, field: &str, keys: &str) -> Result<i32, io::Error> {
+            p.get(field)
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32)
+                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+        }
+        fn f64_field(p: &serde_json::Value, field: &str, keys: &str) -> Result<f64, io::Error> {
+            p.get(field)
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+        }
+
         match self {
-            RawWorkspaceRef::Index(index) => WorkspaceRef::Index(*index),
-            RawWorkspaceRef::Name(name) => WorkspaceRef::Name(name.clone()),
+            // ── zero-payload atoms ──────────────────────────────────────────
+            RawAction::Atom(atom) => match atom.trim_start_matches('#') {
+                "quit"                         => Ok(BindingActionConfig::Quit),
+                "begin_move" | "move"          => Ok(BindingActionConfig::BeginMove),
+                "toggle_overview" | "overview" => Ok(BindingActionConfig::ToggleOverview),
+                "toggle_minimap"  | "minimap"  => Ok(BindingActionConfig::ToggleMinimap),
+                "toggle_pin"      | "pin"      => Ok(BindingActionConfig::TogglePin),
+                "focus_next"                   => Ok(BindingActionConfig::FocusNext),
+                "focus_prev" | "focus_previous"=> Ok(BindingActionConfig::FocusPrev),
+                "toggle_help" | "help"         => Ok(BindingActionConfig::ToggleHelp),
+                other => Err(invalid_keybinding(format!(
+                    "keybinding `{keys}` uses unknown action `{other}`"
+                ))),
+            },
+
+            // ── tagged variants with payloads ───────────────────────────────
+            RawAction::Tagged { tag, payload: p } => match tag.trim_start_matches('#') {
+                "spawn" => {
+                    let cmd = str_field(&p, "command", keys)?;
+                    if cmd.is_empty() {
+                        return Err(invalid_keybinding(format!("keybinding `{keys}`: empty spawn command")));
+                    }
+                    Ok(BindingActionConfig::Spawn {
+                        command: vec!["sh".to_owned(), "-c".to_owned(), cmd.to_owned()],
+                    })
+                }
+                "spawn_args" => {
+                    let args: Vec<String> = serde_json::from_value(
+                        p.get("args").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+                    )
+                    .map_err(|e| invalid_keybinding(format!("keybinding `{keys}` spawn_args: {e}")))?;
+                    if args.is_empty() || args.iter().any(|a| a.is_empty()) {
+                        return Err(invalid_keybinding(format!("keybinding `{keys}`: empty spawn_args")));
+                    }
+                    Ok(BindingActionConfig::Spawn { command: args })
+                }
+                "begin_resize" | "resize" => {
+                    let edges = p.get("edges").and_then(|v| v.as_str())
+                        .unwrap_or("bottom-right").to_owned();
+                    Ok(BindingActionConfig::BeginResize { edges })
+                }
+                "switch_workspace_index" => Ok(BindingActionConfig::SwitchWorkspace {
+                    workspace: WorkspaceRef::Index(i32_field(&p, "n", keys)? as u8),
+                }),
+                "switch_workspace_name" => Ok(BindingActionConfig::SwitchWorkspace {
+                    workspace: WorkspaceRef::Name(str_field(&p, "name", keys)?.to_owned()),
+                }),
+                "move_to_workspace_index" => Ok(BindingActionConfig::MoveToWorkspace {
+                    workspace: WorkspaceRef::Index(i32_field(&p, "n", keys)? as u8),
+                }),
+                "move_to_workspace_name" => Ok(BindingActionConfig::MoveToWorkspace {
+                    workspace: WorkspaceRef::Name(str_field(&p, "name", keys)?.to_owned()),
+                }),
+                "pan" => {
+                    let dx = i32_field(&p, "dx", keys)?;
+                    let dy = i32_field(&p, "dy", keys)?;
+                    if dx == 0 && dy == 0 {
+                        return Err(invalid_keybinding(format!(
+                            "keybinding `{keys}`: pan requires non-zero dx or dy"
+                        )));
+                    }
+                    Ok(BindingActionConfig::PanViewport { dx, dy })
+                }
+                "zoom" => {
+                    let factor = f64_field(&p, "factor", keys)?;
+                    if !(factor.is_finite() && factor > 0.0) {
+                        return Err(invalid_keybinding(format!(
+                            "keybinding `{keys}`: zoom factor must be positive"
+                        )));
+                    }
+                    Ok(BindingActionConfig::ZoomViewport { factor })
+                }
+                "swap_window" | "swap" => Ok(BindingActionConfig::SwapWindow {
+                    target: str_field(&p, "target", keys)?.to_owned(),
+                }),
+                other => Err(invalid_keybinding(format!(
+                    "keybinding `{keys}` uses unknown action `{other}`"
+                ))),
+            },
         }
     }
 }
@@ -401,15 +411,6 @@ fn expand_tilde(path: &str) -> PathBuf {
         return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
-}
-
-impl CommandConfig {
-    fn into_args(self) -> Vec<String> {
-        match self {
-            CommandConfig::Shell(command) => vec!["sh".to_owned(), "-c".to_owned(), command],
-            CommandConfig::Args(args) => args,
-        }
-    }
 }
 
 fn default_keybindings() -> Vec<KeybindingConfig> {

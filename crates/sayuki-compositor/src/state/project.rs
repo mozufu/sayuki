@@ -198,7 +198,7 @@ pub(super) fn resolve_project_contexts(
         .map(|config| {
             let sayuki = SayukiProject::discover(&config.path).and_then(|(path, content)| {
                 if trust.is_trusted(&path, &content) {
-                    match SayukiProject::parse(&content) {
+                    match SayukiProject::parse(&content, path.parent()) {
                         Ok(project) => Some(project),
                         Err(error) => {
                             warn!(?error, path = ?path, "ignoring malformed .sayuki");

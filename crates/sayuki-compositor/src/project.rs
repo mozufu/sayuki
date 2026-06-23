@@ -13,6 +13,7 @@
 
 use std::{
     collections::HashMap,
+    error::Error,
     fs,
     path::{Path, PathBuf},
 };
@@ -105,8 +106,12 @@ pub(crate) struct SayukiProject {
 }
 
 impl SayukiProject {
-    pub(crate) fn parse(content: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(content)
+    /// Parse a `.sayuki` project file written in `.zt`. The final expression
+    /// must be a record compatible with `SayukiProject`. Pass `base` as the
+    /// directory containing the file so that relative `import`s resolve.
+    pub(crate) fn parse(content: &str, base: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+        let json = zutai_eval::eval_with_base(content, base)?.to_json()?;
+        Ok(serde_json::from_value(json)?)
     }
 
     /// Read `<dir>/.sayuki`, returning its path and raw content if present.
@@ -281,16 +286,15 @@ mod tests {
     #[test]
     fn sayuki_project_parses_apps_rules_and_on_init() {
         let project = SayukiProject::parse(
-            r#"
-layout = "floating"
-apps = ["ghostty", "zed ."]
-on_init = "firefox -P sayuki --new-window"
-
-[[window_rule]]
-app_id = "firefox"
-title = "sayuki"
-pin = true
-"#,
+            r#"{
+  layout = "floating";
+  apps = ["ghostty"; "zed .";];
+  on_init = "firefox -P sayuki --new-window";
+  window_rule = [
+    { app_id = "firefox"; title = "sayuki"; pin = true; };
+  ];
+}"#,
+            None,
         )
         .expect("valid .sayuki");
         assert_eq!(project.apps, ["ghostty", "zed ."]);

@@ -19,7 +19,8 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) socket: Option<String>,
 
-    /// TOML config file to load for input settings and keybindings.
+    /// `.zt` config file to load. When omitted, the compositor searches
+    /// `$XDG_CONFIG_HOME/sayuki/config.zt` then `/etc/sayuki/config.zt`.
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
 }

@@ -105,6 +105,11 @@
         };
 
         formatter = formatter;
+
+        packages.config = pkgs.runCommand "sayuki-config" { } ''
+          mkdir -p $out/etc/sayuki
+          cp ${./assets/config.zt} $out/etc/sayuki/config.zt
+        '';
       }
     );
 }
