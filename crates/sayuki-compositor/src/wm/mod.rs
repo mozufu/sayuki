@@ -351,6 +351,14 @@ impl WindowManager {
         &self.snap
     }
 
+    pub(crate) fn set_pan_couple(&mut self, couple: PanCouple) {
+        self.pan_couple = couple;
+    }
+
+    pub(crate) fn set_snap(&mut self, snap: SnapConfig) {
+        self.snap = snap;
+    }
+
     fn index_of(&self, id: CanvasId) -> usize {
         self.canvases
             .iter()

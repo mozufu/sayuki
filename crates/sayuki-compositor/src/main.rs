@@ -1,6 +1,7 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, ffi::OsStr, sync::Arc, time::Duration};
 
 use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
+use inotify::{Inotify, WatchMask};
 use clap::Parser;
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
@@ -44,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     init_tracing();
 
     let args = Args::parse();
-    let config = SayukiConfig::load(args.config.as_deref())?;
+    let (config, config_path) = SayukiConfig::load(args.config.as_deref())?;
     let mut event_loop = EventLoop::<SayukiState>::try_new()?;
     let mut display = Display::<SayukiState>::new()?;
 
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?),
     };
     let mut state = SayukiState::new(&display, config, backend, loop_handle.clone())?;
+    state.config_path = config_path;
 
     let socket_source = match args.socket.as_deref() {
         Some(socket_name) => ListeningSocketSource::with_name(socket_name)?,
@@ -102,6 +104,53 @@ fn main() -> Result<(), Box<dyn Error>> {
             Err(error) => error!(?error, "failed to accept Wayland client"),
         }
     })?;
+
+    // Config hot-reload: a background thread blocks on inotify, filtering for
+    // IN_CLOSE_WRITE and IN_MOVED_TO on the config file's parent directory.
+    // A calloop channel delivers the trigger back to the event loop thread.
+    // Thread-per-watcher is simpler than calloop::generic::Generic<Inotify>
+    // because inotify::Inotify is not DerefMut through NoIoDrop.
+    if let Some(ref path) = state.config_path.clone()
+        && let Some(dir) = path.parent()
+    {
+        let dir = dir.to_owned();
+        let config_filename = path.file_name().map(OsStr::to_owned);
+        match Inotify::init() {
+            Err(err) => error!(?err, "failed to initialise inotify for config hot-reload"),
+            Ok(mut inotify) => {
+                match inotify.watches().add(&dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO) {
+                    Err(err) => error!(?err, "failed to add inotify watch for config dir"),
+                    Ok(_) => {
+                        let (tx, rx) = calloop::channel::channel::<()>();
+                        std::thread::Builder::new()
+                            .name("config-watcher".into())
+                            .spawn(move || {
+                                let mut buf = vec![0u8; 4096];
+                                loop {
+                                    let mut events = match inotify.read_events_blocking(&mut buf) {
+                                        Ok(ev) => ev,
+                                        Err(_) => break,
+                                    };
+                                    let triggered = events.any(|ev| {
+                                        ev.name.map(|n| n.to_owned()) == config_filename
+                                    });
+                                    if triggered && tx.send(()).is_err() {
+                                        break; // main loop exited, drop watcher
+                                    }
+                                }
+                            })
+                            .expect("failed to spawn config-watcher thread");
+                        match loop_handle.insert_source(rx, |_, _, state| {
+                            state.reload_config();
+                        }) {
+                            Err(err) => error!(?err, "failed to register config reload channel"),
+                            Ok(_) => info!(path = %path.display(), "watching config for hot-reload"),
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     state.set_wayland_display(socket_name.clone());
     state.set_ipc_socket(ipc_socket_path.to_string_lossy().into_owned());

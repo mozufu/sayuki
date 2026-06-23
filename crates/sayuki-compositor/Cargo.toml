@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 bitflags.workspace = true
 calloop.workspace = true
+inotify.workspace = true
 clap.workspace = true
 sayuki-ipc = { path = "../sayuki-ipc" }
 serde.workspace = true

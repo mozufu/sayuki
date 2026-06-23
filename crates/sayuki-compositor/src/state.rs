@@ -2,6 +2,7 @@ use std::{
     error::Error,
     io::{self, ErrorKind},
     os::unix::net::UnixStream,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -77,7 +78,7 @@ use smithay::{
         xdg_activation::XdgActivationState,
     },
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     backend::BackendState,
@@ -151,6 +152,9 @@ pub(crate) struct SayukiState {
     pub(crate) locked: bool,
     start_time: Instant,
     pub(crate) running: bool,
+    /// Path of the loaded config file; None when using built-in defaults.
+    /// Set after construction so the inotify watcher can hand it back.
+    pub(crate) config_path: Option<PathBuf>,
 }
 
 impl SayukiState {
@@ -272,7 +276,64 @@ impl SayukiState {
             locked: false,
             start_time: Instant::now(),
             running: true,
+            config_path: None,
         })
+    }
+
+    /// Re-evaluate the watched config file and atomically swap all live config.
+    ///
+    /// If parsing or evaluation fails the error is logged and the compositor
+    /// continues running with the previous config unchanged.
+    pub(crate) fn reload_config(&mut self) {
+        let Some(ref path) = self.config_path.clone() else {
+            return;
+        };
+
+        let cfg = match SayukiConfig::load_from(path) {
+            Ok(c) => c,
+            Err(err) => {
+                warn!(%err, path = %path.display(), "config reload failed; keeping previous config");
+                return;
+            }
+        };
+
+        info!(path = %path.display(), "reloading config");
+
+        // Keyboard: XKB layout + repeat settings.  Clone the Arc-backed handle
+        // so we can pass &mut self as the data parameter without aliasing.
+        let keyboard = self.keyboard.clone();
+        if let Err(err) = keyboard.set_xkb_config(self, cfg.keyboard.xkb_config()) {
+            warn!(?err, "failed to apply new XKB config; layout unchanged");
+        }
+        self.keyboard.change_repeat_info(cfg.keyboard.repeat_rate, cfg.keyboard.repeat_delay);
+
+        // Keybindings + help menu.
+        match KeybindingRegistry::from_configs(&cfg.keybindings) {
+            Ok(registry) => {
+                let entries = registry
+                    .entries()
+                    .map(|(keys, action)| crate::render::help::HelpEntry {
+                        keys: keys.to_owned(),
+                        action: crate::input::actions::action_label(action).to_owned(),
+                    })
+                    .collect();
+                self.keybindings = registry;
+                self.help_menu = crate::render::help::HelpMenu::new(entries);
+            }
+            Err(err) => warn!(%err, "invalid keybinding in new config; keybindings unchanged"),
+        }
+
+        // WM policy.
+        self.wm.set_pan_couple(cfg.pan_couple);
+        self.wm.set_snap(cfg.snap);
+
+        // Output policies: re-apply to every current output.
+        self.output_policies = cfg.outputs;
+        let mut outputs = Vec::new();
+        self.backend.for_each_output(|o| outputs.push(o.clone()));
+        for output in &outputs {
+            output::apply_policy(output, &self.output_policies);
+        }
     }
 
     /// The active canvas's `Space` — the render/hit-test truth for the visible

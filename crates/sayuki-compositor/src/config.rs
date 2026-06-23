@@ -149,20 +149,25 @@ impl SayukiConfig {
     /// 2. `$XDG_CONFIG_HOME/sayuki/config.zt` (user)
     /// 3. `/etc/sayuki/config.zt` (system)
     ///
-    /// When no file is found, built-in defaults apply. Each layer is a `.zt`
-    /// file whose final expression is the config record; layers compose via
-    /// the language's own `import` + `overlayDeep` builtins.
-    pub(crate) fn load(explicit: Option<&Path>) -> Result<Self, Box<dyn Error>> {
+    /// Returns the config and the path that was loaded (None = built-in defaults).
+    /// The path is what callers should watch for hot-reload.
+    pub(crate) fn load(explicit: Option<&Path>) -> Result<(Self, Option<PathBuf>), Box<dyn Error>> {
         let path = explicit
             .map(ToOwned::to_owned)
             .or_else(find_user_config)
             .or_else(find_system_config);
 
         let Some(path) = path else {
-            return Ok(Self::default());
+            return Ok((Self::default(), None));
         };
 
-        let json = zutai_eval::eval_path_to_json(&path)?;
+        let cfg = Self::load_from(&path)?;
+        Ok((cfg, Some(path)))
+    }
+
+    /// Evaluate a specific `.zt` file without path discovery.  Used on hot-reload.
+    pub(crate) fn load_from(path: &Path) -> Result<Self, Box<dyn Error>> {
+        let json = zutai_eval::eval_path_to_json(path)?;
         let raw: RawConfig = serde_json::from_value(json)?;
         raw.try_into_config()
     }
