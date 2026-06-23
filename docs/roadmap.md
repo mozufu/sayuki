@@ -194,11 +194,15 @@ Implement in dependency order: event stream first (unblocks live panels), then
 screencopy (unblocks `grim` and the xdg-desktop-portal path), then
 foreign-toplevel management and tiling.
 
-- [ ] **Subscribable event stream** (from M7) — `Subscribe(Vec<EventKind>)`
+- [x] **Subscribable event stream** (from M7) — `Subscribe(Vec<EventKind>)`
   request upgrades a connection to an event stream; compositor emits
   `Event::Window*`, `Event::Workspace*`, `Event::Output*`, `Event::Config*` as
   side effects of state mutations; backpressure: slow subscriber is dropped;
-  events serialized once and shared across all subscribers.
+  events serialized once and shared across all subscribers. Emitted from
+  `SayukiState` mutations (window open/close/focus, workspace focus, config
+  reload/error, nested-output config); udev output hotplug routes through
+  backend free functions without subscriber access, so those `OutputChanged`
+  emissions remain a documented gap.
 - [ ] **Screencopy / image-copy-capture** (from M6 Tier 1) — render-to-buffer
   glue for both the nested and udev backends; verify current Smithay 0.7 support;
   target: `grim` captures the screen; foundation for the xdg-desktop-portal
