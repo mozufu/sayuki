@@ -4,7 +4,7 @@ Detailed spec for roadmap milestone 7 (`docs/roadmap.md`). Makes Sayuki
 scriptable and configurable, and gives the project-oriented DE its control plane:
 a Unix-socket IPC protocol, a shared `sayuki-ipc` crate, and a `sayukictl` client.
 
-Status: planned. Builds on milestone 5
+Status: in progress. Builds on milestone 5
 (`docs/milestone-5-window-manager-model.md`) and milestone 6
 (`docs/milestone-6-desktop-protocols.md`).
 

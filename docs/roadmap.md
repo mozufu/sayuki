@@ -172,11 +172,17 @@ See `docs/milestone-7-config-and-ipc.md` for the detailed spec (wire format,
 `sayuki-ipc` type sketch, command/query/event taxonomy, hot-reload safety
 matrix).
 
-- layered config: defaults, system, user, then per-project `.sayuki`
-- configure keyboard, input, keybindings, outputs, projects, and window rules
-- live reload with atomic validate-then-swap
-- Unix socket IPC: request/reply plus a subscribable event stream
-- shared `sayuki-ipc` crate (wire types) and an optional `sayukictl` binary
+- [x] shared `sayuki-ipc` crate: wire types, frame codec, `Action`/`Request`/`Reply`
+- [x] `sayukictl` client with `version`, `quit`, `spawn`, `windows`, `workspaces`,
+  `outputs`, `focused` subcommands and `--json` output
+- [x] Unix socket IPC: request/reply transport integrated into the calloop event loop
+- [x] query read path: `GetWindows`, `GetWorkspaces`, `GetOutputs`, `GetFocused`
+  return live compositor snapshots; stable `WindowId` stored in window user-data
+- [ ] layered config: defaults, system, user, then per-project `.sayuki`
+- [ ] configure keyboard, input, keybindings, outputs, projects, and window rules
+  via config alone (partial: TOML config exists; hot-reload and layering pending)
+- [ ] live reload with atomic validate-then-swap
+- [ ] subscribable event stream
 
 ## Reference-first development policy
 

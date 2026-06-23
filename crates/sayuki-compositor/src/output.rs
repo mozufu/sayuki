@@ -88,6 +88,19 @@ fn parse_transform(value: &str) -> Option<Transform> {
     Some(transform)
 }
 
+pub(crate) fn transform_label(transform: Transform) -> &'static str {
+    match transform {
+        Transform::Normal => "normal",
+        Transform::_90 => "90",
+        Transform::_180 => "180",
+        Transform::_270 => "270",
+        Transform::Flipped => "flipped",
+        Transform::Flipped90 => "flipped-90",
+        Transform::Flipped180 => "flipped-180",
+        Transform::Flipped270 => "flipped-270",
+    }
+}
+
 pub(crate) fn create_nested_output(
     display_handle: &DisplayHandle,
     size: Size<i32, Physical>,
@@ -133,6 +146,22 @@ mod tests {
         assert_eq!(parse_transform("90"), Some(Transform::_90));
         assert_eq!(parse_transform("flipped_180"), Some(Transform::Flipped180));
         assert_eq!(parse_transform("bogus"), None);
+    }
+
+    #[test]
+    fn transform_label_inverts_parse_transform() {
+        for transform in [
+            Transform::Normal,
+            Transform::_90,
+            Transform::_180,
+            Transform::_270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ] {
+            assert_eq!(parse_transform(transform_label(transform)), Some(transform));
+        }
     }
 
     #[test]

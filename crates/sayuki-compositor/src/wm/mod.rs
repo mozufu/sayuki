@@ -56,6 +56,12 @@ pub(crate) enum WorkspaceRef {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct CanvasId(u32);
 
+impl CanvasId {
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// One canvas: an unbounded plane (its own `Space`) plus the per-output cameras
 /// looking at it, a focus stack, and pinned HUD windows.
 pub(crate) struct Canvas {
@@ -128,6 +134,14 @@ impl Canvas {
         self.hooks = context.hooks;
         self.rules = context.rules;
         self.apps = context.apps;
+    }
+
+    pub(crate) fn id(&self) -> CanvasId {
+        self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     pub(crate) fn working_dir(&self) -> Option<&Path> {
@@ -364,6 +378,10 @@ impl WindowManager {
 
     pub(crate) fn is_active(&self, id: CanvasId) -> bool {
         self.active == id
+    }
+
+    pub(crate) fn canvases(&self) -> impl Iterator<Item = &Canvas> {
+        self.canvases.iter()
     }
 
     /// Mutable access to a specific canvas (e.g. the target of a window move).

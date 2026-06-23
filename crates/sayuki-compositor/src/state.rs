@@ -1,10 +1,15 @@
 use std::{
     error::Error,
     io::{self, ErrorKind},
+    os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
 
-use calloop::LoopHandle;
+use calloop::{Interest, LoopHandle, Mode, generic::Generic};
+use sayuki_ipc::{
+    Action, OutputInfo, OutputMode, PROTOCOL_VERSION, Point as IpcPoint, Rect as IpcRect, Reply,
+    Request, WindowId, WindowInfo, WorkspaceId, WorkspaceInfo,
+};
 use smithay::{
     backend::{
         drm::{DrmEvent, DrmEventMetadata as EventMetadata},
@@ -78,7 +83,7 @@ use crate::{
     backend::BackendState,
     config::SayukiConfig,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
-    input::{actions::CompositorAction, keybindings::KeybindingRegistry, spawn::ActionRunner},
+    input::{actions::action_label, keybindings::KeybindingRegistry, spawn::ActionRunner},
     output::{self, OutputPolicy},
     render::{
         self, CursorRender,
@@ -137,6 +142,7 @@ pub(crate) struct SayukiState {
     pub(crate) pointer_location: Point<f64, Logical>,
     cursor_image: CursorImageStatus,
     next_window_index: i32,
+    next_window_id: u64,
     output_policies: Vec<OutputPolicy>,
     /// Windows awaiting one-shot window-rule routing once their client has set
     /// app_id/title (which arrive after the toplevel role is created).
@@ -202,7 +208,7 @@ impl SayukiState {
                 .entries()
                 .map(|(keys, action)| HelpEntry {
                     keys: keys.to_owned(),
-                    action: action.label().to_owned(),
+                    action: action_label(action).to_owned(),
                 })
                 .collect(),
         );
@@ -259,6 +265,7 @@ impl SayukiState {
             pointer_location: (0.0, 0.0).into(),
             cursor_image: CursorImageStatus::default_named(),
             next_window_index: 0,
+            next_window_id: 0,
             output_policies,
             pending_rules: Vec::new(),
             lock_surfaces: Vec::new(),
@@ -280,6 +287,24 @@ impl SayukiState {
 
     pub(crate) fn set_wayland_display(&mut self, wayland_display: String) {
         self.action_runner.set_wayland_display(wayland_display);
+    }
+
+    pub(crate) fn set_ipc_socket(&mut self, ipc_socket: String) {
+        self.action_runner.set_ipc_socket(ipc_socket);
+    }
+
+    pub(crate) fn register_ipc_connection(
+        &mut self,
+        stream: UnixStream,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut buffer = Vec::new();
+        self.loop_handle.insert_source(
+            Generic::new(stream, Interest::READ, Mode::Level),
+            move |_, stream, state| {
+                crate::ipc::process_connection_event(stream, &mut buffer, state)
+            },
+        )?;
+        Ok(())
     }
 
     pub(crate) fn set_cursor_image(&mut self, image: CursorImageStatus) {
@@ -346,7 +371,7 @@ impl SayukiState {
         let keyboard = self.keyboard.clone();
         let seat = self.seat.clone();
         self.idle_notifier_state.notify_activity(&seat);
-        let action = keyboard.input::<CompositorAction, _>(
+        let action = keyboard.input::<Action, _>(
             self,
             keycode,
             key_state,
@@ -359,33 +384,170 @@ impl SayukiState {
             },
         );
         if let Some(action) = action {
-            self.run_action(action);
+            self.dispatch_action(action);
         }
     }
 
-    fn run_action(&mut self, action: CompositorAction) {
+    pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
-            CompositorAction::None => {}
-            CompositorAction::Quit => {
+            Action::Noop => {}
+            Action::Quit => {
                 info!("quit action requested");
                 self.running = false;
             }
-            CompositorAction::Spawn(command) => self.spawn_in_active(&command),
-            CompositorAction::BeginMove => self.begin_move_focused_window(),
-            CompositorAction::BeginResize(edges) => self.begin_resize_focused_window(edges),
-            CompositorAction::SwitchWorkspace(workspace) => self.switch_workspace(workspace),
-            CompositorAction::MoveToWorkspace(workspace) => {
-                self.move_focused_to_workspace(workspace)
+            Action::Spawn { argv } => self.spawn_in_active(&argv),
+            Action::BeginMove => self.begin_move_focused_window(),
+            Action::BeginResize { edges } => {
+                self.begin_resize_focused_window(Self::resize_edge_from_ipc(edges))
             }
-            CompositorAction::PanViewport { dx, dy } => self.pan_viewport(Point::from((dx, dy))),
-            CompositorAction::ZoomViewport(factor) => self.zoom_viewport(factor),
-            CompositorAction::ToggleOverview => self.toggle_overview(),
-            CompositorAction::ToggleMinimap => self.toggle_minimap(),
-            CompositorAction::TogglePin => self.toggle_pin_focused(),
-            CompositorAction::SwapWindow(target) => self.swap_focused(target),
-            CompositorAction::FocusNext => self.cycle_focus(CycleDirection::Forward),
-            CompositorAction::FocusPrev => self.cycle_focus(CycleDirection::Backward),
-            CompositorAction::ToggleHelp => self.help_visible = !self.help_visible,
+            Action::SwitchWorkspace { workspace } => {
+                self.switch_workspace(Self::workspace_ref_from_ipc(workspace))
+            }
+            Action::MoveToWorkspace { workspace } => {
+                self.move_focused_to_workspace(Self::workspace_ref_from_ipc(workspace))
+            }
+            Action::PanViewport { dx, dy } => self.pan_viewport(Point::from((dx, dy))),
+            Action::ZoomViewport { factor } => self.zoom_viewport(factor),
+            Action::ToggleOverview => self.toggle_overview(),
+            Action::ToggleMinimap => self.toggle_minimap(),
+            Action::TogglePin => self.toggle_pin_focused(),
+            Action::SwapWindow { target } => self.swap_focused(Self::swap_target_from_ipc(target)),
+            Action::FocusNext => self.cycle_focus(CycleDirection::Forward),
+            Action::FocusPrev => self.cycle_focus(CycleDirection::Backward),
+            Action::ToggleHelp => self.help_visible = !self.help_visible,
+        }
+    }
+
+    pub(crate) fn handle_ipc_request(&mut self, request: Request) -> Reply {
+        match request {
+            Request::GetVersion => Reply::Version {
+                compositor: env!("CARGO_PKG_VERSION").to_owned(),
+                protocol: PROTOCOL_VERSION,
+            },
+            Request::GetWindows => Reply::Windows {
+                windows: self.window_snapshot(),
+            },
+            Request::GetWorkspaces => Reply::Workspaces {
+                workspaces: self.workspace_snapshot(),
+            },
+            Request::GetOutputs => Reply::Outputs {
+                outputs: self.output_snapshot(),
+            },
+            Request::GetFocused => self.focused_reply(),
+            Request::Action { action } => {
+                self.dispatch_action(action);
+                Reply::Ok
+            }
+        }
+    }
+
+    fn window_snapshot(&self) -> Vec<WindowInfo> {
+        self.wm
+            .canvases()
+            .flat_map(|canvas| {
+                canvas.space().elements().filter_map(|window| {
+                    let id = window_id(window)?;
+                    let (app_id, title) = project::window_identity(window);
+                    Some(WindowInfo {
+                        id,
+                        app_id,
+                        title,
+                        workspace: WorkspaceId(canvas.id().raw()),
+                        floating: true,
+                        focused: canvas.focused() == Some(window),
+                        geometry: canvas.space().element_geometry(window).map(rect_from),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn workspace_snapshot(&self) -> Vec<WorkspaceInfo> {
+        self.wm
+            .canvases()
+            .map(|canvas| WorkspaceInfo {
+                id: WorkspaceId(canvas.id().raw()),
+                name: canvas.name().to_owned(),
+                project_path: canvas.working_dir().map(|path| path.display().to_string()),
+                active: self.wm.is_active(canvas.id()),
+                window_ids: canvas.space().elements().filter_map(window_id).collect(),
+            })
+            .collect()
+    }
+
+    fn output_snapshot(&self) -> Vec<OutputInfo> {
+        self.collect_outputs()
+            .into_iter()
+            .map(|output| {
+                let properties = output.physical_properties();
+                OutputInfo {
+                    name: output.name(),
+                    make: properties.make,
+                    model: properties.model,
+                    mode: output.current_mode().map(|mode| OutputMode {
+                        width: mode.size.w,
+                        height: mode.size.h,
+                        refresh: mode.refresh,
+                    }),
+                    scale: output.current_scale().fractional_scale(),
+                    transform: output::transform_label(output.current_transform()).to_owned(),
+                    position: {
+                        let location = output.current_location();
+                        IpcPoint {
+                            x: location.x,
+                            y: location.y,
+                        }
+                    },
+                    work_area: self.output_work_area(&output).map(rect_from),
+                }
+            })
+            .collect()
+    }
+
+    fn focused_reply(&self) -> Reply {
+        Reply::Focused {
+            window: self.wm.active().focused().and_then(window_id),
+            workspace: WorkspaceId(self.wm.active().id().raw()),
+        }
+    }
+
+    fn workspace_ref_from_ipc(reference: sayuki_ipc::WorkspaceRef) -> crate::wm::WorkspaceRef {
+        match reference {
+            sayuki_ipc::WorkspaceRef::Index(index) => crate::wm::WorkspaceRef::Index(index),
+            sayuki_ipc::WorkspaceRef::Name(name) => crate::wm::WorkspaceRef::Name(name),
+        }
+    }
+
+    fn resize_edge_from_ipc(edge: sayuki_ipc::ResizeEdge) -> ResizeEdge {
+        match edge {
+            sayuki_ipc::ResizeEdge::None => ResizeEdge::NONE,
+            sayuki_ipc::ResizeEdge::Top => ResizeEdge::TOP,
+            sayuki_ipc::ResizeEdge::Bottom => ResizeEdge::BOTTOM,
+            sayuki_ipc::ResizeEdge::Left => ResizeEdge::LEFT,
+            sayuki_ipc::ResizeEdge::Right => ResizeEdge::RIGHT,
+            sayuki_ipc::ResizeEdge::TopLeft => ResizeEdge::TOP_LEFT,
+            sayuki_ipc::ResizeEdge::TopRight => ResizeEdge::TOP_RIGHT,
+            sayuki_ipc::ResizeEdge::BottomLeft => ResizeEdge::BOTTOM_LEFT,
+            sayuki_ipc::ResizeEdge::BottomRight => ResizeEdge::BOTTOM_RIGHT,
+        }
+    }
+
+    fn swap_target_from_ipc(target: sayuki_ipc::SwapTarget) -> crate::wm::swap::SwapTarget {
+        match target {
+            sayuki_ipc::SwapTarget::Direction { direction } => {
+                crate::wm::swap::SwapTarget::Direction(Self::direction_from_ipc(direction))
+            }
+            sayuki_ipc::SwapTarget::Next => crate::wm::swap::SwapTarget::Next,
+            sayuki_ipc::SwapTarget::Prev => crate::wm::swap::SwapTarget::Prev,
+        }
+    }
+
+    fn direction_from_ipc(direction: sayuki_ipc::Direction) -> crate::wm::swap::Direction {
+        match direction {
+            sayuki_ipc::Direction::Left => crate::wm::swap::Direction::Left,
+            sayuki_ipc::Direction::Right => crate::wm::swap::Direction::Right,
+            sayuki_ipc::Direction::Up => crate::wm::swap::Direction::Up,
+            sayuki_ipc::Direction::Down => crate::wm::swap::Direction::Down,
         }
     }
 
@@ -592,12 +754,18 @@ impl SayukiState {
         // app_id/title are not set yet at role creation; place on the active
         // canvas now and defer window-rule routing to the first buffered commit.
         let window = Window::new_wayland_window(surface);
+        self.assign_window_id(&window);
         self.register_foreign_toplevel(&window);
         self.place_window(window.clone());
         self.focus_window(window.clone());
         self.pending_rules.push(window);
     }
 
+    fn assign_window_id(&mut self, window: &Window) {
+        let id = WindowId(self.next_window_id);
+        self.next_window_id = self.next_window_id.wrapping_add(1);
+        window.user_data().insert_if_missing(|| id);
+    }
     pub(crate) fn remove_toplevel(&mut self, surface: &WlSurface) {
         let Some(window) = self.window_for_toplevel_surface(surface) else {
             return;
@@ -1244,6 +1412,19 @@ pub(crate) fn cursor_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
             .and_then(|attributes| attributes.lock().ok().map(|attributes| attributes.hotspot))
             .unwrap_or_else(|| (0, 0).into())
     })
+}
+
+pub(crate) fn window_id(window: &Window) -> Option<WindowId> {
+    window.user_data().get::<WindowId>().copied()
+}
+
+fn rect_from(rectangle: Rectangle<i32, Logical>) -> IpcRect {
+    IpcRect {
+        x: rectangle.loc.x,
+        y: rectangle.loc.y,
+        width: rectangle.size.w,
+        height: rectangle.size.h,
+    }
 }
 
 fn set_window_size(window: &Window, size: Size<i32, Logical>) {
