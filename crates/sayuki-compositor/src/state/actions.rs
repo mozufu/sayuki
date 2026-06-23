@@ -6,6 +6,7 @@
 //! focused; as a descendant of `state` they still reach the private
 //! `SayukiState` fields and helpers directly.
 
+use sayuki_ipc::{Event, WorkspaceId};
 use std::path::Path;
 
 use smithay::{
@@ -73,17 +74,25 @@ impl SayukiState {
     pub(crate) fn apply_focus(&mut self, window: Option<Window>) {
         let keyboard = self.keyboard.clone();
         let serial = SERIAL_COUNTER.next_serial();
-        match window {
+        let focused_id = match &window {
             Some(window) => {
-                self.space_mut().raise_element(&window, true);
-                self.reveal_window(&window);
+                self.space_mut().raise_element(window, true);
+                self.reveal_window(window);
                 self.send_pending_window_configures();
                 let surface = window
                     .toplevel()
                     .map(|toplevel| toplevel.wl_surface().clone());
                 keyboard.set_focus(self, surface, serial);
+                super::window_id(window)
             }
-            None => keyboard.set_focus(self, None, serial),
+            None => {
+                keyboard.set_focus(self, None, serial);
+                None
+            }
+        };
+        if self.focused_ipc != focused_id {
+            self.focused_ipc = focused_id;
+            self.emit_event(Event::WindowFocused { id: focused_id });
         }
     }
 
@@ -139,6 +148,9 @@ impl SayukiState {
         let enter_env = self.wm.active().env().to_vec();
         self.run_commands(enter, enter_dir.as_deref(), &enter_env);
 
+        self.emit_event(Event::WorkspaceFocused {
+            id: WorkspaceId(self.wm.active().id().raw()),
+        });
         self.apply_focus(focus);
         self.send_pending_window_configures();
     }

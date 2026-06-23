@@ -7,8 +7,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use sayuki_ipc::{
-    Action, FrameError, OutputInfo, Reply, Request, WindowInfo, WorkspaceInfo, encode_frame,
-    try_decode_frame,
+    Action, Event, EventKind, FrameError, OutputInfo, Reply, Request, WindowInfo, WorkspaceInfo,
+    encode_frame, try_decode_frame,
 };
 
 #[derive(Debug, Parser)]
@@ -41,16 +41,77 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         argv: Vec<String>,
     },
+    /// Stream compositor events until interrupted. Filter by kind
+    /// (window, workspace, output, config, action); no kinds means all.
+    Subscribe {
+        #[arg(value_delimiter = ',')]
+        kinds: Vec<String>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let request = request_from_command(args.command);
     let socket_path = require_socket_path(args.socket)?;
-    let reply = request_reply(&socket_path, &request)?;
+    match args.command {
+        Command::Subscribe { kinds } => {
+            let events = parse_event_kinds(&kinds)?;
+            subscribe(&socket_path, &events, args.json)
+        }
+        command => {
+            let request = request_from_command(command);
+            let reply = request_reply(&socket_path, &request)?;
+            print!("{}", render_reply(&reply, args.json));
+            Ok(())
+        }
+    }
+}
 
-    print!("{}", render_reply(&reply, args.json));
-    Ok(())
+fn parse_event_kinds(kinds: &[String]) -> io::Result<Vec<EventKind>> {
+    kinds
+        .iter()
+        .map(|kind| match kind.as_str() {
+            "window" => Ok(EventKind::Window),
+            "workspace" => Ok(EventKind::Workspace),
+            "output" => Ok(EventKind::Output),
+            "config" => Ok(EventKind::Config),
+            "action" => Ok(EventKind::Action),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unknown event kind '{other}' (expected window, workspace, output, config, or action)"
+                ),
+            )),
+        })
+        .collect()
+}
+
+fn subscribe(socket_path: &Path, events: &[EventKind], json: bool) -> Result<(), Box<dyn Error>> {
+    let mut stream = UnixStream::connect(socket_path)?;
+    let request = Request::Subscribe {
+        events: events.to_vec(),
+    };
+    let frame = encode_frame(&request).map_err(frame_error_to_io)?;
+    stream.write_all(&frame)?;
+
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match try_decode_frame::<Event>(&mut buffer) {
+            Ok(Some(event)) => {
+                print!("{}", render_event(&event, json));
+                io::stdout().flush()?;
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => return Err(Box::new(frame_error_to_io(error))),
+        }
+
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
 }
 
 fn request_from_command(command: Command) -> Request {
@@ -66,6 +127,8 @@ fn request_from_command(command: Command) -> Request {
         Command::Spawn { argv } => Request::Action {
             action: Action::Spawn { argv },
         },
+        // Subscribe is dispatched in `main` via the streaming path.
+        Command::Subscribe { .. } => unreachable!("subscribe is handled in main"),
     }
 }
 
@@ -129,6 +192,28 @@ fn render_reply(reply: &Reply, json: bool) -> String {
                 .unwrap_or_else(|| "none".to_owned()),
             workspace.0
         ),
+    }
+}
+
+fn render_event(event: &Event, json: bool) -> String {
+    if json {
+        return serde_json::to_string(event).expect("serialize event") + "\n";
+    }
+
+    match event {
+        Event::WindowOpened { window } => format!("window-opened {}\n", window.id.0),
+        Event::WindowClosed { id } => format!("window-closed {}\n", id.0),
+        Event::WindowFocused { id } => format!(
+            "window-focused {}\n",
+            id.map(|id| id.0.to_string())
+                .unwrap_or_else(|| "none".to_owned())
+        ),
+        Event::WorkspaceFocused { id } => format!("workspace-focused {}\n", id.0),
+        Event::OutputChanged { output } => format!("output-changed {}\n", output.name),
+        Event::OutputRemoved { name } => format!("output-removed {name}\n"),
+        Event::ConfigReloaded => "config-reloaded\n".to_owned(),
+        Event::ConfigError { message } => format!("config-error {message}\n"),
+        Event::ActionInvoked { action } => format!("action-invoked {action:?}\n"),
     }
 }
 

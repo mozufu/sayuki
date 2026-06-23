@@ -22,7 +22,15 @@ pub enum Request {
     GetWorkspaces,
     GetOutputs,
     GetFocused,
-    Action { action: Action },
+    Action {
+        action: Action,
+    },
+    /// Upgrade this connection into an event stream carrying the requested
+    /// event kinds. After this request the server only pushes `Event` frames;
+    /// it sends no `Reply`. An empty list subscribes to every kind.
+    Subscribe {
+        events: Vec<EventKind>,
+    },
 }
 
 /// IPC reply sent for one request.
@@ -106,16 +114,47 @@ pub struct OutputInfo {
     pub work_area: Option<Rect>,
 }
 
-/// Subscribable compositor event.
+/// Subscribable compositor event, pushed to connections that have sent
+/// `Request::Subscribe`. Each variant maps to exactly one [`EventKind`] via
+/// [`Event::kind`], which a subscriber's kind filter is matched against.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Event {
+    WindowOpened { window: WindowInfo },
+    WindowClosed { id: WindowId },
+    WindowFocused { id: Option<WindowId> },
+    WorkspaceFocused { id: WorkspaceId },
+    OutputChanged { output: OutputInfo },
+    OutputRemoved { name: String },
+    ConfigReloaded,
+    ConfigError { message: String },
     ActionInvoked { action: Action },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+impl Event {
+    /// The [`EventKind`] a subscriber filters on to receive this event.
+    pub fn kind(&self) -> EventKind {
+        match self {
+            Self::WindowOpened { .. } | Self::WindowClosed { .. } | Self::WindowFocused { .. } => {
+                EventKind::Window
+            }
+            Self::WorkspaceFocused { .. } => EventKind::Workspace,
+            Self::OutputChanged { .. } | Self::OutputRemoved { .. } => EventKind::Output,
+            Self::ConfigReloaded | Self::ConfigError { .. } => EventKind::Config,
+            Self::ActionInvoked { .. } => EventKind::Action,
+        }
+    }
+}
+
+/// Coarse event category a connection subscribes to. One kind covers a related
+/// family of [`Event`] variants (e.g. `Window` covers open/close/focus).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
+    Window,
+    Workspace,
+    Output,
+    Config,
     Action,
 }
 
@@ -354,5 +393,84 @@ mod tests {
             Some(reply)
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn subscribe_request_round_trips() {
+        let request = Request::Subscribe {
+            events: vec![EventKind::Window, EventKind::Workspace],
+        };
+        let frame = encode_frame(&request).expect("frame");
+        let mut buffer = frame;
+
+        assert_eq!(
+            try_decode_frame::<Request>(&mut buffer).expect("decoded"),
+            Some(request)
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn subscribe_request_uses_kebab_case_tags() {
+        assert_eq!(
+            serde_json::to_value(Request::Subscribe {
+                events: vec![EventKind::Window, EventKind::Config],
+            })
+            .expect("json"),
+            serde_json::json!({"type": "subscribe", "events": ["window", "config"]})
+        );
+    }
+
+    #[test]
+    fn event_kind_maps_every_variant() {
+        assert_eq!(
+            Event::WindowClosed { id: WindowId(1) }.kind(),
+            EventKind::Window
+        );
+        assert_eq!(Event::WindowFocused { id: None }.kind(), EventKind::Window);
+        assert_eq!(
+            Event::WorkspaceFocused { id: WorkspaceId(2) }.kind(),
+            EventKind::Workspace
+        );
+        assert_eq!(
+            Event::OutputRemoved {
+                name: "eDP-1".to_owned()
+            }
+            .kind(),
+            EventKind::Output
+        );
+        assert_eq!(Event::ConfigReloaded.kind(), EventKind::Config);
+        assert_eq!(
+            Event::ActionInvoked {
+                action: Action::Quit
+            }
+            .kind(),
+            EventKind::Action
+        );
+    }
+
+    #[test]
+    fn event_frame_round_trips() {
+        let event = Event::WindowClosed { id: WindowId(9) };
+        let frame = encode_frame(&event).expect("frame");
+        let mut buffer = frame;
+
+        assert_eq!(
+            try_decode_frame::<Event>(&mut buffer).expect("decoded"),
+            Some(event)
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn event_json_uses_kebab_case_tags() {
+        assert_eq!(
+            serde_json::to_value(Event::WindowClosed { id: WindowId(3) }).expect("json"),
+            serde_json::json!({"type": "window-closed", "id": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(Event::WindowFocused { id: None }).expect("json"),
+            serde_json::json!({"type": "window-focused", "id": null})
+        );
     }
 }

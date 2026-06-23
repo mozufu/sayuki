@@ -8,8 +8,8 @@ use std::{
 
 use calloop::{Interest, LoopHandle, Mode, generic::Generic};
 use sayuki_ipc::{
-    Action, OutputInfo, OutputMode, PROTOCOL_VERSION, Point as IpcPoint, Rect as IpcRect, Reply,
-    Request, WindowId, WindowInfo, WorkspaceId, WorkspaceInfo,
+    Action, Event, EventKind, OutputInfo, OutputMode, PROTOCOL_VERSION, Point as IpcPoint,
+    Rect as IpcRect, Reply, Request, WindowId, WindowInfo, WorkspaceId, WorkspaceInfo,
 };
 use smithay::{
     backend::{
@@ -85,6 +85,7 @@ use crate::{
     config::SayukiConfig,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::action_label, keybindings::KeybindingRegistry, spawn::ActionRunner},
+    ipc::{ConnectionId, Subscribers},
     output::{self, OutputPolicy},
     render::{
         self, CursorRender,
@@ -155,6 +156,14 @@ pub(crate) struct SayukiState {
     /// Path of the loaded config file; None when using built-in defaults.
     /// Set after construction so the inotify watcher can hand it back.
     pub(crate) config_path: Option<PathBuf>,
+    /// Event-stream subscribers (connections that sent `Request::Subscribe`).
+    ipc_subscribers: Subscribers,
+    /// Monotonic id handed to each accepted IPC connection, so a subscriber can
+    /// be reaped when its read source closes.
+    ipc_next_conn_id: u64,
+    /// Last window id broadcast in a `WindowFocused` event, so focus changes are
+    /// emitted once rather than on every `apply_focus` call.
+    focused_ipc: Option<WindowId>,
 }
 
 impl SayukiState {
@@ -277,6 +286,9 @@ impl SayukiState {
             start_time: Instant::now(),
             running: true,
             config_path: None,
+            ipc_subscribers: Subscribers::default(),
+            ipc_next_conn_id: 0,
+            focused_ipc: None,
         })
     }
 
@@ -293,6 +305,9 @@ impl SayukiState {
             Ok(c) => c,
             Err(err) => {
                 warn!(%err, path = %path.display(), "config reload failed; keeping previous config");
+                self.emit_event(Event::ConfigError {
+                    message: err.to_string(),
+                });
                 return;
             }
         };
@@ -305,7 +320,8 @@ impl SayukiState {
         if let Err(err) = keyboard.set_xkb_config(self, cfg.keyboard.xkb_config()) {
             warn!(?err, "failed to apply new XKB config; layout unchanged");
         }
-        self.keyboard.change_repeat_info(cfg.keyboard.repeat_rate, cfg.keyboard.repeat_delay);
+        self.keyboard
+            .change_repeat_info(cfg.keyboard.repeat_rate, cfg.keyboard.repeat_delay);
 
         // Keybindings + help menu.
         match KeybindingRegistry::from_configs(&cfg.keybindings) {
@@ -334,6 +350,16 @@ impl SayukiState {
         for output in &outputs {
             output::apply_policy(output, &self.output_policies);
         }
+
+        // Notify subscribers: per-output scale/transform may have changed, and
+        // the reload as a whole succeeded.
+        if self.ipc_subscribers.any_wants(EventKind::Output) {
+            for output in &outputs {
+                let info = self.output_info(output);
+                self.emit_event(Event::OutputChanged { output: info });
+            }
+        }
+        self.emit_event(Event::ConfigReloaded);
     }
 
     /// The active canvas's `Space` — the render/hit-test truth for the visible
@@ -358,14 +384,46 @@ impl SayukiState {
         &mut self,
         stream: UnixStream,
     ) -> Result<(), Box<dyn Error>> {
+        let id = self.alloc_ipc_connection_id();
         let mut buffer = Vec::new();
         self.loop_handle.insert_source(
             Generic::new(stream, Interest::READ, Mode::Level),
             move |_, stream, state| {
-                crate::ipc::process_connection_event(stream, &mut buffer, state)
+                crate::ipc::process_connection_event(id, stream, &mut buffer, state)
             },
         )?;
         Ok(())
+    }
+
+    fn alloc_ipc_connection_id(&mut self) -> ConnectionId {
+        let id = ConnectionId(self.ipc_next_conn_id);
+        self.ipc_next_conn_id = self.ipc_next_conn_id.wrapping_add(1);
+        id
+    }
+
+    /// Upgrade an IPC connection into an event-stream subscriber.
+    pub(crate) fn subscribe_ipc(
+        &mut self,
+        id: ConnectionId,
+        stream: UnixStream,
+        kinds: Vec<EventKind>,
+    ) {
+        self.ipc_subscribers.subscribe(id, stream, kinds);
+    }
+
+    /// Drop a subscriber whose connection has closed. Idempotent.
+    pub(crate) fn drop_ipc_subscriber(&mut self, id: ConnectionId) {
+        self.ipc_subscribers.remove(id);
+    }
+
+    /// Whether `id` has upgraded to an event-stream subscriber.
+    pub(crate) fn is_ipc_subscriber(&self, id: ConnectionId) -> bool {
+        self.ipc_subscribers.contains(id)
+    }
+
+    /// Broadcast `event` to every subscriber whose filter accepts its kind.
+    fn emit_event(&mut self, event: Event) {
+        self.ipc_subscribers.broadcast(&event);
     }
 
     pub(crate) fn set_cursor_image(&mut self, image: CursorImageStatus) {
@@ -450,6 +508,11 @@ impl SayukiState {
     }
 
     pub(crate) fn dispatch_action(&mut self, action: Action) {
+        if self.ipc_subscribers.any_wants(EventKind::Action) {
+            self.emit_event(Event::ActionInvoked {
+                action: action.clone(),
+            });
+        }
         match action {
             Action::Noop => {}
             Action::Quit => {
@@ -499,6 +562,11 @@ impl SayukiState {
                 self.dispatch_action(action);
                 Reply::Ok
             }
+            // Subscribe is intercepted at the connection layer
+            // (`ipc::process_connection_event`) and never reaches here.
+            Request::Subscribe { .. } => Reply::Error {
+                message: "subscribe is handled at the connection layer".to_owned(),
+            },
         }
     }
 
@@ -506,21 +574,35 @@ impl SayukiState {
         self.wm
             .canvases()
             .flat_map(|canvas| {
-                canvas.space().elements().filter_map(|window| {
-                    let id = window_id(window)?;
-                    let (app_id, title) = project::window_identity(window);
-                    Some(WindowInfo {
-                        id,
-                        app_id,
-                        title,
-                        workspace: WorkspaceId(canvas.id().raw()),
-                        floating: true,
-                        focused: canvas.focused() == Some(window),
-                        geometry: canvas.space().element_geometry(window).map(rect_from),
-                    })
-                })
+                canvas
+                    .space()
+                    .elements()
+                    .filter_map(move |window| Self::window_info_on(canvas, window))
             })
             .collect()
+    }
+
+    /// Build the IPC `WindowInfo` for `window` as it sits on `canvas`.
+    fn window_info_on(canvas: &crate::wm::Canvas, window: &Window) -> Option<WindowInfo> {
+        let id = window_id(window)?;
+        let (app_id, title) = project::window_identity(window);
+        Some(WindowInfo {
+            id,
+            app_id,
+            title,
+            workspace: WorkspaceId(canvas.id().raw()),
+            floating: true,
+            focused: canvas.focused() == Some(window),
+            geometry: canvas.space().element_geometry(window).map(rect_from),
+        })
+    }
+
+    /// Find `window` across canvases and build its `WindowInfo`.
+    fn window_info_for(&self, window: &Window) -> Option<WindowInfo> {
+        self.wm
+            .canvases()
+            .find(|canvas| canvas.space().elements().any(|element| element == window))
+            .and_then(|canvas| Self::window_info_on(canvas, window))
     }
 
     fn workspace_snapshot(&self) -> Vec<WorkspaceInfo> {
@@ -539,30 +621,34 @@ impl SayukiState {
     fn output_snapshot(&self) -> Vec<OutputInfo> {
         self.collect_outputs()
             .into_iter()
-            .map(|output| {
-                let properties = output.physical_properties();
-                OutputInfo {
-                    name: output.name(),
-                    make: properties.make,
-                    model: properties.model,
-                    mode: output.current_mode().map(|mode| OutputMode {
-                        width: mode.size.w,
-                        height: mode.size.h,
-                        refresh: mode.refresh,
-                    }),
-                    scale: output.current_scale().fractional_scale(),
-                    transform: output::transform_label(output.current_transform()).to_owned(),
-                    position: {
-                        let location = output.current_location();
-                        IpcPoint {
-                            x: location.x,
-                            y: location.y,
-                        }
-                    },
-                    work_area: self.output_work_area(&output).map(rect_from),
-                }
-            })
+            .map(|output| self.output_info(&output))
             .collect()
+    }
+
+    /// Build the IPC `OutputInfo` describing `output`'s current mode, scale,
+    /// transform, position, and work area.
+    fn output_info(&self, output: &Output) -> OutputInfo {
+        let properties = output.physical_properties();
+        OutputInfo {
+            name: output.name(),
+            make: properties.make,
+            model: properties.model,
+            mode: output.current_mode().map(|mode| OutputMode {
+                width: mode.size.w,
+                height: mode.size.h,
+                refresh: mode.refresh,
+            }),
+            scale: output.current_scale().fractional_scale(),
+            transform: output::transform_label(output.current_transform()).to_owned(),
+            position: {
+                let location = output.current_location();
+                IpcPoint {
+                    x: location.x,
+                    y: location.y,
+                }
+            },
+            work_area: self.output_work_area(output).map(rect_from),
+        }
     }
 
     fn focused_reply(&self) -> Reply {
@@ -750,6 +836,10 @@ impl SayukiState {
         output::apply_policy(&output, &self.output_policies);
         let location = self.wm.active().viewport(&output.name()).loc;
         self.wm.active_space_mut().map_output(&output, location);
+        if self.ipc_subscribers.any_wants(EventKind::Output) {
+            let info = self.output_info(&output);
+            self.emit_event(Event::OutputChanged { output: info });
+        }
     }
 
     pub(crate) fn add_layer_surface(
@@ -818,6 +908,9 @@ impl SayukiState {
         self.assign_window_id(&window);
         self.register_foreign_toplevel(&window);
         self.place_window(window.clone());
+        if let Some(info) = self.window_info_for(&window) {
+            self.emit_event(Event::WindowOpened { window: info });
+        }
         self.focus_window(window.clone());
         self.pending_rules.push(window);
     }
@@ -834,6 +927,9 @@ impl SayukiState {
         self.unregister_foreign_toplevel(&window);
         self.pending_rules.retain(|pending| pending != &window);
         if self.wm.remove_window(&window) {
+            if let Some(id) = window_id(&window) {
+                self.emit_event(Event::WindowClosed { id });
+            }
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
         }
