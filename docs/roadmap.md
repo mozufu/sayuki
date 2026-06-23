@@ -178,10 +178,14 @@ matrix).
 - [x] Unix socket IPC: request/reply transport integrated into the calloop event loop
 - [x] query read path: `GetWindows`, `GetWorkspaces`, `GetOutputs`, `GetFocused`
   return live compositor snapshots; stable `WindowId` stored in window user-data
-- [ ] layered config: defaults, system, user, then per-project `.sayuki`
-- [ ] configure keyboard, input, keybindings, outputs, projects, and window rules
-  via config alone (partial: TOML config exists; hot-reload and layering pending)
-- [ ] live reload with atomic validate-then-swap
+- [x] layered config: defaults (`/etc/sayuki/config.zt`), user (`$XDG_CONFIG_HOME/sayuki/config.zt`),
+  fallback to Rust built-in defaults; per-project `.sayuki` files evaluated via `eval_with_base`
+- [x] configure keyboard, input, keybindings, outputs, and projects via `.zt` config files;
+  typed `Action` tagged union replaces stringly-typed keybinding actions
+- [x] live reload with atomic validate-then-swap: inotify watches the config file's parent
+  directory; a background thread delivers triggers via `calloop::channel`; on success all live
+  config is swapped (keyboard XKB + repeat, keybindings, pan/snap policy, output policies);
+  on error the compositor keeps running with the previous config unchanged
 - [ ] subscribable event stream
 
 ## Reference-first development policy
