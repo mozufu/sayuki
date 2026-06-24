@@ -203,10 +203,18 @@ foreign-toplevel management and tiling.
   reload/error, nested-output config); udev output hotplug routes through
   backend free functions without subscriber access, so those `OutputChanged`
   emissions remain a documented gap.
-- [ ] **Screencopy / image-copy-capture** (from M6 Tier 1) — render-to-buffer
-  glue for both the nested and udev backends; verify current Smithay 0.7 support;
-  target: `grim` captures the screen; foundation for the xdg-desktop-portal
-  ScreenCast backend.
+- [x] **Screencopy / image-copy-capture** (from M6 Tier 1) — hand-written
+  `wlr-screencopy-unstable-v1` (manager v3) glue in `screencopy.rs`; Smithay 0.7
+  ships no helper, so the module implements the `GlobalDispatch`/`Dispatch` impls
+  directly. Both backends render through `GlesRenderer`, so a single `ExportMem`
+  offscreen-readback path serves both: captures are deferred onto
+  `SayukiState::pending_screencopy` and drained by `fulfill_screencopy` after the
+  on-screen render (wlr "next frame" semantics). SHM only (`Xrgb8888`), rendered
+  upright; `grim` capture verified end-to-end (full-output PNG, pixels match the
+  background). `copy_with_damage` reports full-frame damage every frame (the
+  compositor has no damage-tracking subsystem yet) — a valid superset, but the
+  incremental-capture optimisation remains a documented gap. Foundation for the
+  xdg-desktop-portal ScreenCast backend.
 - [ ] **Foreign-toplevel management** (from M6 Tier 1) — external
   activate/close/fullscreen via `wlr-foreign-toplevel-management`; verify
   Smithay 0.7 handler availability; fall back to custom protocol glue in
