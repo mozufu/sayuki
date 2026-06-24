@@ -182,6 +182,21 @@ impl NativeBackend {
         }
     }
 
+    /// The `GlesRenderer` whose device drives `output`, matched by name.
+    pub(crate) fn renderer_for_output(&mut self, output: &Output) -> Option<&mut GlesRenderer> {
+        let name = output.name();
+        for device in self.devices.values_mut() {
+            if device
+                .outputs
+                .values()
+                .any(|native| native.output.name() == name)
+            {
+                return Some(&mut device.renderer);
+            }
+        }
+        None
+    }
+
     pub(crate) fn handle_udev_event(
         &mut self,
         event: UdevEvent,

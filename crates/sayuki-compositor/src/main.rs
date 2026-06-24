@@ -35,6 +35,7 @@ mod logging;
 mod output;
 mod project;
 mod render;
+mod screencopy;
 mod state;
 mod wayland;
 mod wm;

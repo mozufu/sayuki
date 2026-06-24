@@ -91,6 +91,7 @@ use crate::{
         self, CursorRender,
         help::{HelpEntry, HelpMenu},
     },
+    screencopy::{self, Screencopy, ScreencopyManagerState},
     wm::{WindowManager, focus::CycleDirection, viewport},
 };
 
@@ -164,6 +165,11 @@ pub(crate) struct SayukiState {
     /// Last window id broadcast in a `WindowFocused` event, so focus changes are
     /// emitted once rather than on every `apply_focus` call.
     focused_ipc: Option<WindowId>,
+    /// Owns the `zwlr_screencopy_manager_v1` global.
+    _screencopy_state: ScreencopyManagerState,
+    /// Captures recorded by `copy`/`copy_with_damage`, fulfilled at the end of
+    /// the next render pass.
+    pub(crate) pending_screencopy: Vec<Screencopy>,
 }
 
 impl SayukiState {
@@ -205,6 +211,7 @@ impl SayukiState {
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let security_context_state =
             SecurityContextState::new::<Self, _>(&display_handle, |_| true);
+        let screencopy_state = ScreencopyManagerState::new(&display_handle);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
@@ -289,6 +296,8 @@ impl SayukiState {
             ipc_subscribers: Subscribers::default(),
             ipc_next_conn_id: 0,
             focused_ipc: None,
+            _screencopy_state: screencopy_state,
+            pending_screencopy: Vec::new(),
         })
     }
 
@@ -1300,8 +1309,52 @@ impl SayukiState {
                 )?;
             }
         }
+        self.fulfill_screencopy();
 
         Ok(())
+    }
+
+    /// Drain pending screencopy captures: render each output into an offscreen
+    /// texture and copy the requested region into the client's SHM buffer. Runs
+    /// after the on-screen render so captures observe the frame just drawn.
+    fn fulfill_screencopy(&mut self) {
+        if self.pending_screencopy.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_screencopy);
+        let cursor = match &self.cursor_image {
+            CursorImageStatus::Surface(surface) => Some(CursorRender {
+                surface,
+                hotspot: cursor_hotspot(surface),
+                location: self.pointer_location,
+            }),
+            _ => None,
+        };
+        let help_menu = self.help_visible.then_some(&self.help_menu);
+        let locked = self.locked;
+        let canvas = self.wm.active();
+        let lock_surfaces = self.lock_surfaces.as_slice();
+
+        for capture in pending {
+            let overlay_cursor = if capture.overlay_cursor { cursor } else { None };
+            let Some(renderer) = self.backend.renderer_for_output(&capture.output) else {
+                capture.frame.failed();
+                continue;
+            };
+            let elements = render::output_elements(
+                renderer,
+                canvas,
+                &capture.output,
+                overlay_cursor,
+                help_menu,
+                lock_surfaces,
+                locked,
+            );
+            match screencopy::render_capture(renderer, &elements, &capture, BACKGROUND) {
+                Ok(()) => screencopy::send_ready(&capture),
+                Err(_) => capture.frame.failed(),
+            }
+        }
     }
 
     pub(crate) fn frame_time(&self) -> u32 {
