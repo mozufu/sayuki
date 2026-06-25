@@ -215,11 +215,21 @@ foreign-toplevel management and tiling.
   compositor has no damage-tracking subsystem yet) — a valid superset, but the
   incremental-capture optimisation remains a documented gap. Foundation for the
   xdg-desktop-portal ScreenCast backend.
-- [ ] **Foreign-toplevel management** (from M6 Tier 1) — external
-  activate/close/fullscreen via `wlr-foreign-toplevel-management`; verify
-  Smithay 0.7 handler availability; fall back to custom protocol glue in
-  `sayuki-protocols` if needed; target: a taskbar or `waybar` window control
-  module can raise and close windows.
+- [x] **Foreign-toplevel management** (from M6 Tier 1) — hand-written
+  `wlr-foreign-toplevel-management` (manager v3) glue in `foreign_toplevel.rs`;
+  Smithay 0.7 ships only the *list* helper, so the module implements the
+  `GlobalDispatch`/`Dispatch` impls directly (screencopy precedent), reusing the
+  existing WM paths: `activate` → focus/raise (switching to the window's canvas
+  first when it is off-screen), `close` → `xdg_toplevel.close`, and
+  set/unset fullscreen + maximize → the existing `xdg-shell` request handlers.
+  The `state` array reflects committed xdg maximized/fullscreen plus a synthetic
+  `activated` bit for the keyboard-focused window, kept in sync across every
+  focus path (click, layer/lock focus, close). Per-client manager instances each
+  get their own handles, with `output_enter`/`leave` tracking the window's
+  current output (best-effort, reconverging on commit). `waybar`/taskbar can
+  enumerate, raise, and close windows. Minimize and `set_rectangle` are
+  intentional no-ops (the canvas model has no minimize); the `parent` event is
+  never emitted.
 - [ ] **Tiling layouts** (from M5b) — first-class tiling alongside the floating
   canvas model; snap/swap remains the floating-first default; tiling is
   opt-in per workspace or via window rules; reference `niri`'s column layout and
