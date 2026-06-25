@@ -230,6 +230,39 @@ solid); xdg-desktop-portal backend (`xdg-desktop-portal-sayuki` — separate DBu
 service implementing ScreenCast via PipeWire, Screenshot, Settings,
 GlobalShortcuts; builds on M8 screencopy).
 
+### 9. First-party protocols (`sayuki-protocols`)
+
+Sayuki's own Wayland protocol extensions for the project-oriented WM concepts that
+no standard protocol expresses and the out-of-band IPC plane cannot reach: a
+capability earns a custom protocol only when it is bound to `wl_surface`/`wl_client`
+lifecycle **and** no standard wlr/ext protocol covers it. Everything else stays in
+`sayuki-ipc` (control plane) or standard protocols (ecosystem interop).
+
+See `docs/milestone-9-first-party-protocols.md` for the detailed spec (interface
+sketches, the security-context trust gate, the shared M8 emission seam, and the
+crate/build plumbing).
+
+- [ ] **`sayuki-protocols` crate** — `protocols/*.xml` + `build.rs` running
+  `wayland-scanner`; generated bindings only, with `GlobalDispatch`/`Dispatch`
+  impls in the compositor (the hand-rolled `screencopy.rs` pattern).
+- [ ] **Security-context trust gate** (finishes M6 Tier 2 enforcement) — replace
+  the `|_| true` filter with a real per-client trust predicate; advertise the
+  `zsayuki_*` globals only to trusted first-party clients, withhold from sandboxes.
+- [ ] **`zsayuki_project_v1`** — per-surface project affinity: a client tags an
+  `xdg_toplevel` with project name + persistent canvas coords + rule hints before
+  map, so placement is race-free instead of heuristic; closes the M7 gap for
+  externally-spawned windows.
+- [ ] **`zsayuki_canvas_v1`** — the unbounded-canvas viewport, per `wl_output`:
+  observer events (viewport, window geometry, project change) for minimap/overview
+  clients, and controller requests (pan/zoom/focus/overview) for the shell, fed
+  from and routed through the same seams IPC already uses.
+
+Then (`sayuki-ipc`, not protocols): project-lifecycle `Action`s (create/switch/
+close, apply layout, run hooks) for a first-party project shell.
+
+Deferred: frame-synced minimap rendering; incremental geometry diffs; strict
+unknown-project errors.
+
 ## Reference-first development policy
 
 Before implementing a sizeable compositor feature, check whether Smithay already
@@ -246,25 +279,41 @@ advance.
 
 ## Workspace crate plan
 
-Start inside `crates/sayuki-compositor` as modules. Split crates only after the
-interfaces are clear.
+The workspace globs in every crate directory (`members = ["crates/*"]`). The
+original plan — *write logic as modules inside `sayuki-compositor`, split crates
+only once interfaces are clear* — still holds; in practice the split has been
+**scaffolded ahead of extraction**: the target crate directories exist with a
+documented `lib.rs`, but most compositor logic still lives as modules in
+`sayuki-compositor` and the boundaries are extracted incrementally.
 
-Likely future crates:
+Current crates and status:
 
-- `sayuki-compositor`: main binary and top-level backend selection
-- `sayuki-core`: Smithay state, protocol glue, event loop integration
-- `sayuki-wm`: windows, workspaces, focus, stacking, layout policy
-- `sayuki-input`: keybindings, input actions, xkb helpers
-- `sayuki-config`: config data model, parsing, validation
-- `sayuki-ipc`: IPC message types and server/client helpers
-- `sayukictl`: optional command-line IPC client
+| Crate | Status | Role |
+|---|---|---|
+| `sayuki-compositor` | populated (binary) | main binary; holds the live state, WM, input, config, render, IPC server, and protocol glue as modules (`state.rs`, `wm/`, `input/`, `config.rs`, `render.rs`, `ipc.rs`, `screencopy.rs`, …) pending extraction |
+| `sayuki-ipc` | populated, in use | wire types + frame codec for the Unix-socket control plane; depended on by the compositor and `sayukictl` |
+| `sayukictl` | populated, in use | command-line IPC client |
+| `sayuki-core` | scaffolding | shared runtime primitives (app id, component metadata); target home for Smithay state / event-loop glue and the M9 `zsayuki_*` `Dispatch` impls |
+| `sayuki-wm` | scaffolding | window/workspace/focus/stacking/layout policy types for the canvas model |
+| `sayuki-input` | scaffolding | keybinding, input-action, and xkb policy primitives |
+| `sayuki-config` | scaffolding | config data model, parsing, validation |
+| `sayuki-render` | scaffolding | rendering helpers: decorations, damage, effects |
 
-Possible later crates:
+"Scaffolding" means the crate exists with a doc-commented `lib.rs` but the
+corresponding logic has not yet been moved out of `sayuki-compositor`; extraction
+happens as each interface stabilizes.
 
-- `sayuki-render`: rendering helpers, decorations, damage helpers
+Committed, not yet created:
+
+- `sayuki-protocols`: generated bindings for Sayuki's custom protocol XML
+  (`zsayuki_project_v1`, `zsayuki_canvas_v1`); created in milestone 9. Holds
+  generated bindings only — `GlobalDispatch`/`Dispatch` impls stay with the
+  compositor / `sayuki-core`.
+
+Possible later crate:
+
 - `sayuki-backend`: abstraction over nested, X11, and DRM/udev backends if the
-  backend code grows large
-- `sayuki-protocols`: generated bindings for custom protocol XML, if any
+  backend code grows large.
 
 ## Initial dependency policy
 
