@@ -1705,6 +1705,7 @@ dependencies = [
  "clap",
  "inotify",
  "sayuki-ipc",
+ "sayuki-wm",
  "serde",
  "serde_json",
  "smithay",
@@ -1745,6 +1746,10 @@ version = "0.1.0"
 [[package]]
 name = "sayuki-wm"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "smithay",
+]
 
 [[package]]
 name = "sayukictl"
@@ -3042,6 +3047,7 @@ name = "zutai-im-syntax"
 version = "0.1.0"
 dependencies = [
  "rustc-hash 2.1.2",
+ "unicode-ident",
  "winnow",
  "zutai-types",
 ]
@@ -3067,6 +3073,7 @@ dependencies = [
  "num-traits",
  "rowan",
  "rustc-hash 2.1.2",
+ "unicode-ident",
  "winnow",
 ]
 

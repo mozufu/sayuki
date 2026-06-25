@@ -6,7 +6,7 @@
 
 /// Direction for [`cycle`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CycleDirection {
+pub enum CycleDirection {
     /// Move focus toward the front of the stack (older windows), wrapping.
     Forward,
     /// Move focus toward the back of the stack (newer windows), wrapping.
@@ -15,14 +15,14 @@ pub(crate) enum CycleDirection {
 
 /// Focus `item`, moving it to the tail. If it is already present it is moved
 /// rather than duplicated, preserving the single-occurrence invariant.
-pub(crate) fn focus<T: PartialEq>(stack: &mut Vec<T>, item: T) {
+pub fn focus<T: PartialEq>(stack: &mut Vec<T>, item: T) {
     stack.retain(|existing| existing != &item);
     stack.push(item);
 }
 
 /// Remove `item` from the stack. Returns `true` when the removed item was the
 /// focused (tail) element, so the caller can re-focus the new tail.
-pub(crate) fn remove<T: PartialEq>(stack: &mut Vec<T>, item: &T) -> bool {
+pub fn remove<T: PartialEq>(stack: &mut Vec<T>, item: &T) -> bool {
     let Some(position) = stack.iter().position(|existing| existing == item) else {
         return false;
     };
@@ -35,7 +35,7 @@ pub(crate) fn remove<T: PartialEq>(stack: &mut Vec<T>, item: &T) -> bool {
 /// the tail; with fewer than two members this is a no-op. Repeated calls visit
 /// every member in turn and a `Forward` followed by a `Backward` is the
 /// identity, so the gesture is reversible.
-pub(crate) fn cycle<T>(stack: &mut [T], direction: CycleDirection) {
+pub fn cycle<T>(stack: &mut [T], direction: CycleDirection) {
     if stack.len() < 2 {
         return;
     }

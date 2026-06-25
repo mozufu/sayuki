@@ -6,7 +6,7 @@ use smithay::utils::{Logical, Point, Rectangle};
 
 /// A direction for [`SwapTarget::Direction`] / directional focus selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Left,
     Right,
     Up,
@@ -15,7 +15,7 @@ pub(crate) enum Direction {
 
 /// What a `SwapWindow` action swaps the focused window with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SwapTarget {
+pub enum SwapTarget {
     /// The geometrically nearest window in a direction (by center).
     Direction(Direction),
     /// The next window along the MRU stack.
@@ -26,7 +26,7 @@ pub(crate) enum SwapTarget {
 
 /// The two rectangles after a swap: each window takes the other's position and
 /// size. Returned as `(first, second)` matching the input order.
-pub(crate) fn exchange(
+pub fn exchange(
     first: Rectangle<i32, Logical>,
     second: Rectangle<i32, Logical>,
 ) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
@@ -40,7 +40,7 @@ fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
 /// Pick the index of the candidate whose center is nearest to `focused`'s
 /// center within the half-plane of `direction`. Candidates not in the direction
 /// are ignored; ties break toward the smaller squared distance.
-pub(crate) fn nearest_in_direction(
+pub fn nearest_in_direction(
     focused: Rectangle<i32, Logical>,
     candidates: &[(usize, Rectangle<i32, Logical>)],
     direction: Direction,

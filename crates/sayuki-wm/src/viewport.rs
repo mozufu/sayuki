@@ -8,36 +8,36 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// Pan is clamped to this many logical pixels from the origin on each axis so
 /// snap/centering arithmetic stays well clear of `i32` overflow.
-pub(crate) const PAN_LIMIT: i32 = 1_000_000;
+pub const PAN_LIMIT: i32 = 1_000_000;
 
 /// Zoom bounds. `1.0` is native; below zooms out (more canvas visible), above
 /// zooms in.
-pub(crate) const MIN_ZOOM: f64 = 0.1;
-pub(crate) const MAX_ZOOM: f64 = 10.0;
+pub const MIN_ZOOM: f64 = 0.1;
+pub const MAX_ZOOM: f64 = 10.0;
 
 /// Logical-pixel stagger applied to freshly placed windows, cycling through
 /// [`WINDOW_STAGGER_STEPS`] positions.
-pub(crate) const WINDOW_STAGGER: i32 = 32;
-pub(crate) const WINDOW_STAGGER_STEPS: i32 = 10;
+pub const WINDOW_STAGGER: i32 = 32;
+pub const WINDOW_STAGGER_STEPS: i32 = 10;
 
 /// An output's camera onto the canvas.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Viewport {
+pub struct Viewport {
     /// Canvas coordinate rendered at the output's top-left corner at zoom 1.
-    pub(crate) loc: Point<i32, Logical>,
+    pub loc: Point<i32, Logical>,
     /// `1.0` = native; `<1` zoom out, `>1` zoom in.
-    pub(crate) zoom: f64,
+    pub zoom: f64,
 }
 
 impl Viewport {
     /// A native (zoom 1) viewport anchored at `loc`.
-    pub(crate) const fn new(loc: Point<i32, Logical>) -> Self {
+    pub const fn new(loc: Point<i32, Logical>) -> Self {
         Self { loc, zoom: 1.0 }
     }
 }
 
 /// Clamp a pan location to [`PAN_LIMIT`] on each axis.
-pub(crate) fn clamp_pan(loc: Point<i32, Logical>) -> Point<i32, Logical> {
+pub fn clamp_pan(loc: Point<i32, Logical>) -> Point<i32, Logical> {
     Point::from((
         loc.x.clamp(-PAN_LIMIT, PAN_LIMIT),
         loc.y.clamp(-PAN_LIMIT, PAN_LIMIT),
@@ -45,7 +45,7 @@ pub(crate) fn clamp_pan(loc: Point<i32, Logical>) -> Point<i32, Logical> {
 }
 
 /// Clamp a zoom factor to [`MIN_ZOOM`, `MAX_ZOOM`].
-pub(crate) fn clamp_zoom(zoom: f64) -> f64 {
+pub fn clamp_zoom(zoom: f64) -> f64 {
     if zoom.is_finite() {
         zoom.clamp(MIN_ZOOM, MAX_ZOOM)
     } else {
@@ -55,7 +55,7 @@ pub(crate) fn clamp_zoom(zoom: f64) -> f64 {
 
 /// The canvas region (in logical pixels) visible through `output_size` at
 /// `zoom`. Zooming in shrinks the region; zooming out enlarges it.
-pub(crate) fn visible_size(output_size: Size<i32, Logical>, zoom: f64) -> Size<i32, Logical> {
+pub fn visible_size(output_size: Size<i32, Logical>, zoom: f64) -> Size<i32, Logical> {
     let zoom = clamp_zoom(zoom);
     let w = (f64::from(output_size.w.max(1)) / zoom).round() as i32;
     let h = (f64::from(output_size.h.max(1)) / zoom).round() as i32;
@@ -65,7 +65,7 @@ pub(crate) fn visible_size(output_size: Size<i32, Logical>, zoom: f64) -> Size<i
 /// The canvas rectangle visible through `viewport` for an output of
 /// `output_size`. This is exactly the region to feed
 /// `Space::render_elements_for_region`.
-pub(crate) fn visible_region(
+pub fn visible_region(
     viewport: &Viewport,
     output_size: Size<i32, Logical>,
 ) -> Rectangle<i32, Logical> {
@@ -74,17 +74,14 @@ pub(crate) fn visible_region(
 
 /// Map an output-local pointer position to canvas coordinates, inverting the
 /// zoom: `canvas = loc + output_local / zoom`.
-pub(crate) fn to_canvas(
-    viewport: &Viewport,
-    output_local: Point<f64, Logical>,
-) -> Point<f64, Logical> {
+pub fn to_canvas(viewport: &Viewport, output_local: Point<f64, Logical>) -> Point<f64, Logical> {
     let zoom = clamp_zoom(viewport.zoom);
     viewport.loc.to_f64() + Point::from((output_local.x / zoom, output_local.y / zoom))
 }
 
 /// Zoom by `factor` about the output center, keeping the canvas point under the
 /// center fixed. The result is pan- and zoom-clamped.
-pub(crate) fn zoom_about_center(
+pub fn zoom_about_center(
     viewport: &Viewport,
     output_size: Size<i32, Logical>,
     factor: f64,
@@ -102,7 +99,7 @@ pub(crate) fn zoom_about_center(
 
 /// A viewport that fits `bbox` into `output_size` with `margin` (e.g. `0.9`),
 /// centered. Used by the overview. Falls back to native when `bbox` is empty.
-pub(crate) fn fit_viewport(
+pub fn fit_viewport(
     output_size: Size<i32, Logical>,
     bbox: Rectangle<i32, Logical>,
     margin: f64,
@@ -122,7 +119,7 @@ pub(crate) fn fit_viewport(
 /// The minimal pan that brings `window` fully into the viewport's visible
 /// region. Windows larger than the region are aligned to their top-left so at
 /// least their origin is visible.
-pub(crate) fn reveal_pan(
+pub fn reveal_pan(
     viewport: &Viewport,
     output_size: Size<i32, Logical>,
     window: Rectangle<i32, Logical>,
@@ -150,23 +147,20 @@ fn reveal_axis(loc: i32, visible: i32, window_start: i32, window_len: i32) -> i3
 }
 
 /// Staggered offset for the `index`-th placed window.
-pub(crate) fn stagger_offset(index: i32) -> i32 {
+pub fn stagger_offset(index: i32) -> i32 {
     WINDOW_STAGGER * index.rem_euclid(WINDOW_STAGGER_STEPS)
 }
 
 /// Placement location for a new window inside `region` (the viewport region the
 /// pointer is over). No clamping: windows may sit anywhere on the canvas.
-pub(crate) fn placement_location(
-    region: Rectangle<i32, Logical>,
-    index: i32,
-) -> Point<i32, Logical> {
+pub fn placement_location(region: Rectangle<i32, Logical>, index: i32) -> Point<i32, Logical> {
     let offset = stagger_offset(index);
     region.loc + Point::from((offset, offset))
 }
 
 /// The bounding rectangle of `rects`, or `None` when empty. Used to clamp the
 /// pointer to the union of the active canvas's output rectangles.
-pub(crate) fn bounding_rect(
+pub fn bounding_rect(
     rects: impl IntoIterator<Item = Rectangle<i32, Logical>>,
 ) -> Option<Rectangle<i32, Logical>> {
     let mut iter = rects.into_iter();

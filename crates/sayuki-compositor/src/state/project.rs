@@ -22,7 +22,7 @@ use super::SayukiState;
 use crate::{
     input::spawn::SpawnContext,
     output,
-    project::{ProjectConfig, ProjectContext, SayukiProject, TrustStore},
+    project::{ProjectConfig, ProjectContext, SayukiProject, TrustStore, resolve_context},
     wm::{CanvasId, viewport},
 };
 
@@ -210,7 +210,7 @@ pub(super) fn resolve_project_contexts(
                     None
                 }
             });
-            let context = ProjectContext::resolve(Some(config.clone()), sayuki);
+            let context = resolve_context(Some(config.clone()), sayuki);
             (config.name.clone(), context)
         })
         .collect()

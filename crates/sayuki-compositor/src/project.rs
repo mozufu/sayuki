@@ -1,15 +1,17 @@
-//! Project session layer (milestone 5b policy).
+//! Project session layer (milestone 5b): discovery, trust, and the config merge.
 //!
 //! A canvas can carry a *project context*: a working directory, a small env
 //! overlay, lifecycle hooks, window rules, and a declarative app set. **direnv
 //! owns the environment; Sayuki owns the windows/session** — the two compose on
 //! the same directory.
 //!
-//! Two sources feed a project: the user's central `[[project]]` config (parsed
-//! in `config.rs`, inherently trusted) and a per-directory `.sayuki` file
-//! (discovered here, honored only when the trust gate allows it). Everything in
-//! this module is pure and unit-tested; the live spawning/hook execution lives
-//! in `state.rs`/`input/spawn.rs`.
+//! The pure policy types (`HookCmd`, `CanvasHooks`, `WindowRule`,
+//! `ProjectContext`) live in `sayuki-wm` and are re-exported here. This module
+//! owns the compositor-side machinery the policy is built from: parsing the
+//! central `[[project]]` config (in `config.rs`, inherently trusted), discovering
+//! a per-directory `.sayuki` file (honored only when the trust gate allows it),
+//! and merging the two into a `ProjectContext` via [`resolve_context`]. The live
+//! spawning/hook execution lives in `state.rs`/`input/spawn.rs`.
 
 use std::{
     collections::HashMap,
@@ -20,67 +22,7 @@ use std::{
 
 use serde::Deserialize;
 
-/// A hook or app command: either a shell line (`sh -c`) or an explicit argv.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(untagged)]
-pub(crate) enum HookCmd {
-    Shell(String),
-    Args(Vec<String>),
-}
-
-impl HookCmd {
-    /// The argv to execute for this command.
-    pub(crate) fn to_args(&self) -> Vec<String> {
-        match self {
-            HookCmd::Shell(command) => vec!["sh".to_owned(), "-c".to_owned(), command.clone()],
-            HookCmd::Args(args) => args.clone(),
-        }
-    }
-}
-
-/// Lifecycle hooks for a project canvas. `on_init` runs once (first activation);
-/// `on_enter`/`on_leave` run on every activation/deactivation and must be
-/// idempotent. `on_destroy` is reserved for canvas teardown (unused in 5b).
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(default)]
-pub(crate) struct CanvasHooks {
-    pub(crate) on_init: Option<HookCmd>,
-    pub(crate) on_enter: Option<HookCmd>,
-    pub(crate) on_leave: Option<HookCmd>,
-    pub(crate) on_destroy: Option<HookCmd>,
-}
-
-/// A map-time routing rule: a window matching `app_id`/`title` is routed to the
-/// project canvas that owns the rule.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(crate) struct WindowRule {
-    #[serde(default)]
-    pub(crate) app_id: Option<String>,
-    #[serde(default)]
-    pub(crate) title: Option<String>,
-    /// Route the matching surface back to this canvas.
-    #[serde(default)]
-    pub(crate) pin: bool,
-}
-
-impl WindowRule {
-    /// Whether this rule matches a window's `app_id`/`title`. Each specified
-    /// field is a substring test; an unspecified field is a wildcard. A rule
-    /// with no fields matches nothing (it would otherwise capture everything).
-    pub(crate) fn matches(&self, app_id: Option<&str>, title: Option<&str>) -> bool {
-        if self.app_id.is_none() && self.title.is_none() {
-            return false;
-        }
-        field_matches(self.app_id.as_deref(), app_id) && field_matches(self.title.as_deref(), title)
-    }
-}
-
-fn field_matches(want: Option<&str>, value: Option<&str>) -> bool {
-    match want {
-        None => true,
-        Some(want) => value.is_some_and(|value| value.contains(want)),
-    }
-}
+pub(crate) use sayuki_wm::project::{CanvasHooks, HookCmd, ProjectContext, WindowRule};
 
 /// A central `[[project]]` entry (built in `config.rs`). Inherently trusted.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,40 +64,30 @@ impl SayukiProject {
     }
 }
 
-/// A canvas's resolved project context: the merge of the central config with the
-/// `.sayuki` file (the latter only when trusted).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ProjectContext {
-    pub(crate) working_dir: Option<PathBuf>,
-    pub(crate) env: Vec<(String, String)>,
-    pub(crate) hooks: CanvasHooks,
-    pub(crate) rules: Vec<WindowRule>,
-    pub(crate) apps: Vec<String>,
-}
+/// Merge a central config entry with a `.sayuki` file into a [`ProjectContext`].
+/// Pass `sayuki = Some` **only when the file is trusted**; an untrusted (or
+/// absent) `.sayuki` contributes no apps, rules, or hooks, so the project still
+/// opens with central-config defaults. The `.sayuki`'s `on_init` takes
+/// precedence over the central one when both are present.
+pub(crate) fn resolve_context(
+    central: Option<ProjectConfig>,
+    sayuki: Option<SayukiProject>,
+) -> ProjectContext {
+    let central_on_init = central.as_ref().and_then(|config| config.on_init.clone());
+    let (sayuki_on_init, apps, rules) = match sayuki {
+        Some(sayuki) => (sayuki.on_init, sayuki.apps, sayuki.window_rules),
+        None => (None, Vec::new(), Vec::new()),
+    };
 
-impl ProjectContext {
-    /// Merge a central config entry with a `.sayuki` file. Pass `sayuki = Some`
-    /// **only when the file is trusted**; an untrusted (or absent) `.sayuki`
-    /// contributes no apps, rules, or hooks, so the project still opens with
-    /// central-config defaults. The `.sayuki`'s `on_init` takes precedence over
-    /// the central one when both are present.
-    pub(crate) fn resolve(central: Option<ProjectConfig>, sayuki: Option<SayukiProject>) -> Self {
-        let central_on_init = central.as_ref().and_then(|config| config.on_init.clone());
-        let (sayuki_on_init, apps, rules) = match sayuki {
-            Some(sayuki) => (sayuki.on_init, sayuki.apps, sayuki.window_rules),
-            None => (None, Vec::new(), Vec::new()),
-        };
-
-        Self {
-            working_dir: central.as_ref().map(|config| config.path.clone()),
-            env: central.map(|config| config.env).unwrap_or_default(),
-            hooks: CanvasHooks {
-                on_init: sayuki_on_init.or(central_on_init),
-                ..CanvasHooks::default()
-            },
-            rules,
-            apps,
-        }
+    ProjectContext {
+        working_dir: central.as_ref().map(|config| config.path.clone()),
+        env: central.map(|config| config.env).unwrap_or_default(),
+        hooks: CanvasHooks {
+            on_init: sayuki_on_init.or(central_on_init),
+            ..CanvasHooks::default()
+        },
+        rules,
+        apps,
     }
 }
 
@@ -237,53 +169,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_cmd_shell_wraps_in_sh() {
-        assert_eq!(
-            HookCmd::Shell("firefox -P sayuki".to_owned()).to_args(),
-            ["sh", "-c", "firefox -P sayuki"]
-        );
-        assert_eq!(
-            HookCmd::Args(vec!["zed".to_owned(), ".".to_owned()]).to_args(),
-            ["zed", "."]
-        );
-    }
-
-    #[test]
-    fn window_rule_matches_app_id_substring() {
-        let rule = WindowRule {
-            app_id: Some("firefox".to_owned()),
-            title: None,
-            pin: true,
-        };
-        assert!(rule.matches(Some("firefox"), None));
-        assert!(rule.matches(Some("org.mozilla.firefox"), Some("anything")));
-        assert!(!rule.matches(Some("ghostty"), None));
-        assert!(!rule.matches(None, None));
-    }
-
-    #[test]
-    fn window_rule_requires_both_specified_fields() {
-        let rule = WindowRule {
-            app_id: Some("firefox".to_owned()),
-            title: Some("sayuki".to_owned()),
-            pin: true,
-        };
-        assert!(rule.matches(Some("firefox"), Some("sayuki — Mozilla")));
-        // app_id matches but title does not.
-        assert!(!rule.matches(Some("firefox"), Some("other")));
-    }
-
-    #[test]
-    fn empty_rule_matches_nothing() {
-        let rule = WindowRule {
-            app_id: None,
-            title: None,
-            pin: true,
-        };
-        assert!(!rule.matches(Some("firefox"), Some("anything")));
-    }
-
-    #[test]
     fn sayuki_project_parses_apps_rules_and_on_init() {
         let project = SayukiProject::parse(
             r#"{
@@ -324,13 +209,13 @@ mod tests {
             ..SayukiProject::default()
         };
         // Untrusted: caller passes `None`, so apps/on_init are dropped.
-        let untrusted = ProjectContext::resolve(Some(config()), None);
+        let untrusted = resolve_context(Some(config()), None);
         assert!(untrusted.apps.is_empty());
         assert_eq!(untrusted.hooks.on_init, None);
         assert_eq!(untrusted.working_dir, Some(PathBuf::from("/p")));
 
         // Trusted: apps and on_init come through.
-        let trusted = ProjectContext::resolve(Some(config()), Some(sayuki));
+        let trusted = resolve_context(Some(config()), Some(sayuki));
         assert_eq!(trusted.apps, ["ghostty"]);
         assert_eq!(
             trusted.hooks.on_init,
@@ -345,7 +230,7 @@ mod tests {
             ..config()
         };
         // No .sayuki: central on_init used.
-        let context = ProjectContext::resolve(Some(central.clone()), None);
+        let context = resolve_context(Some(central.clone()), None);
         assert_eq!(
             context.hooks.on_init,
             Some(HookCmd::Shell("central".to_owned()))
@@ -356,7 +241,7 @@ mod tests {
             on_init: Some(HookCmd::Shell("project".to_owned())),
             ..SayukiProject::default()
         };
-        let context = ProjectContext::resolve(Some(central), Some(sayuki));
+        let context = resolve_context(Some(central), Some(sayuki));
         assert_eq!(
             context.hooks.on_init,
             Some(HookCmd::Shell("project".to_owned()))

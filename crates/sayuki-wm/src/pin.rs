@@ -5,14 +5,13 @@
 //! changes we recompute its canvas location so it renders at a fixed on-screen
 //! anchor. The anchor maths is pure and unit-tested here.
 
-use smithay::{
-    desktop::Window,
-    utils::{Logical, Point, Rectangle, Size},
-};
+use smithay::utils::{Logical, Point, Rectangle, Size};
+
+use crate::WmWindow;
 
 /// Which output corner a pinned window anchors to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Corner {
+pub enum Corner {
     TopLeft,
     TopRight,
     BottomLeft,
@@ -21,23 +20,23 @@ pub(crate) enum Corner {
 
 /// An anchor: a corner plus an inset, in output-local logical pixels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ViewportAnchor {
-    pub(crate) corner: Corner,
-    pub(crate) offset: Point<i32, Logical>,
+pub struct ViewportAnchor {
+    pub corner: Corner,
+    pub offset: Point<i32, Logical>,
 }
 
 /// A window pinned to a specific output's viewport.
-pub(crate) struct Pinned {
-    pub(crate) window: Window,
-    pub(crate) output: String,
-    pub(crate) anchor: ViewportAnchor,
+pub struct Pinned {
+    pub window: WmWindow,
+    pub output: String,
+    pub anchor: ViewportAnchor,
 }
 
 /// The canvas-space location for a pinned window so it renders at its anchor.
 /// `output_geometry` is the output's rectangle in the canvas (`[viewport.loc,
 /// output_size]`), so the result is independent of zoom (pinned windows draw in
 /// a 1:1 overlay).
-pub(crate) fn pinned_location(
+pub fn pinned_location(
     output_geometry: Rectangle<i32, Logical>,
     window_size: Size<i32, Logical>,
     anchor: &ViewportAnchor,
@@ -60,7 +59,7 @@ pub(crate) fn pinned_location(
 
 /// Capture an anchor from a window's current on-screen position: the nearest
 /// corner of its output, and the inset to that corner.
-pub(crate) fn capture_anchor(
+pub fn capture_anchor(
     output_geometry: Rectangle<i32, Logical>,
     window: Rectangle<i32, Logical>,
 ) -> ViewportAnchor {

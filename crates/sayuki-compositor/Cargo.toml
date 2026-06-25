@@ -12,6 +12,7 @@ calloop.workspace = true
 inotify.workspace = true
 clap.workspace = true
 sayuki-ipc = { path = "../sayuki-ipc" }
+sayuki-wm = { path = "../sayuki-wm" }
 serde.workspace = true
 serde_json.workspace = true
 smithay.workspace = true

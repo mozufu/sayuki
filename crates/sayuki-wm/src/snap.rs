@@ -6,15 +6,15 @@ use smithay::utils::{Logical, Point, Rectangle};
 
 /// Snap behaviour, configured under `[snap]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SnapConfig {
+pub struct SnapConfig {
     /// Magnetization distance in logical px; `0` disables edge/window snapping.
-    pub(crate) threshold: i32,
+    pub threshold: i32,
     /// Soft grid pitch in logical px; `0` disables grid snapping.
-    pub(crate) grid: i32,
+    pub grid: i32,
     /// Snap to other windows' edges.
-    pub(crate) to_windows: bool,
+    pub to_windows: bool,
     /// Snap to viewport/output edges.
-    pub(crate) to_edges: bool,
+    pub to_edges: bool,
 }
 
 impl Default for SnapConfig {
@@ -37,7 +37,7 @@ enum Axis {
 /// Compute the snapped top-left for `dragged` given `window_edges` (other
 /// windows) and `viewport_edges` (output rectangles). The dragged size is
 /// preserved; only the location moves.
-pub(crate) fn snap_location(
+pub fn snap_location(
     dragged: Rectangle<i32, Logical>,
     window_edges: &[Rectangle<i32, Logical>],
     viewport_edges: &[Rectangle<i32, Logical>],
