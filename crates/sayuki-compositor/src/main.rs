@@ -28,6 +28,7 @@ use crate::{
 mod backend;
 mod cli;
 mod config;
+mod foreign_toplevel;
 mod grabs;
 mod input;
 mod ipc;

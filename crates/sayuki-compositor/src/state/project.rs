@@ -173,7 +173,7 @@ fn surface_has_buffer(surface: &WlSurface) -> bool {
 }
 
 /// The committed `app_id`/`title` of a toplevel window, for window-rule matching.
-pub(super) fn window_identity(window: &Window) -> (Option<String>, Option<String>) {
+pub(crate) fn window_identity(window: &Window) -> (Option<String>, Option<String>) {
     let Some(toplevel) = window.toplevel() else {
         return (None, None);
     };

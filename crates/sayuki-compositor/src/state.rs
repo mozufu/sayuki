@@ -83,6 +83,7 @@ use tracing::{debug, info, warn};
 use crate::{
     backend::BackendState,
     config::SayukiConfig,
+    foreign_toplevel::ForeignToplevelManagerState,
     grabs::{PointerMoveSurfaceGrab, PointerResizeSurfaceGrab, ResizeEdge},
     input::{actions::action_label, keybindings::KeybindingRegistry, spawn::ActionRunner},
     ipc::{ConnectionId, Subscribers},
@@ -98,6 +99,8 @@ use crate::{
 mod actions;
 mod project;
 
+pub(crate) use project::window_identity;
+
 const BACKGROUND: Color32F = Color32F::new(0.07, 0.08, 0.11, 1.0);
 
 pub(crate) struct SayukiState {
@@ -110,6 +113,7 @@ pub(crate) struct SayukiState {
     pub(crate) wlr_data_control_state: WlrDataControlState,
     pub(crate) ext_data_control_state: ExtDataControlState,
     pub(crate) foreign_toplevel_list: ForeignToplevelListState,
+    pub(crate) foreign_toplevel_manager: ForeignToplevelManagerState,
     pub(crate) idle_notifier_state: IdleNotifierState<Self>,
     pub(crate) _idle_inhibit_state: IdleInhibitManagerState,
     pub(crate) session_lock_state: SessionLockManagerState,
@@ -164,7 +168,7 @@ pub(crate) struct SayukiState {
     ipc_next_conn_id: u64,
     /// Last window id broadcast in a `WindowFocused` event, so focus changes are
     /// emitted once rather than on every `apply_focus` call.
-    focused_ipc: Option<WindowId>,
+    pub(crate) focused_ipc: Option<WindowId>,
     /// Owns the `zwlr_screencopy_manager_v1` global.
     _screencopy_state: ScreencopyManagerState,
     /// Captures recorded by `copy`/`copy_with_damage`, fulfilled at the end of
@@ -192,6 +196,7 @@ impl SayukiState {
         let ext_data_control_state =
             ExtDataControlState::new::<Self, _>(&display_handle, None, |_| true);
         let foreign_toplevel_list = ForeignToplevelListState::new::<Self>(&display_handle);
+        let foreign_toplevel_manager = ForeignToplevelManagerState::new(&display_handle);
         let idle_notifier_state =
             IdleNotifierState::<Self>::new(&display_handle, loop_handle.clone());
         let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&display_handle);
@@ -252,6 +257,7 @@ impl SayukiState {
             wlr_data_control_state,
             ext_data_control_state,
             foreign_toplevel_list,
+            foreign_toplevel_manager,
             idle_notifier_state,
             _idle_inhibit_state: idle_inhibit_state,
             session_lock_state,
@@ -916,6 +922,7 @@ impl SayukiState {
         let window = Window::new_wayland_window(surface);
         self.assign_window_id(&window);
         self.register_foreign_toplevel(&window);
+        self.register_wlr_toplevel(&window);
         self.place_window(window.clone());
         if let Some(info) = self.window_info_for(&window) {
             self.emit_event(Event::WindowOpened { window: info });
@@ -934,6 +941,7 @@ impl SayukiState {
             return;
         };
         self.unregister_foreign_toplevel(&window);
+        self.unregister_wlr_toplevel(&window);
         self.pending_rules.retain(|pending| pending != &window);
         if self.wm.remove_window(&window) {
             if let Some(id) = window_id(&window) {
@@ -973,6 +981,7 @@ impl SayukiState {
         if let Some(window) = self.window_for_toplevel_surface(surface) {
             window.on_commit();
             self.refresh_foreign_toplevel(&window);
+            self.refresh_wlr_toplevel(&window);
             self.route_pending_window(&window, surface);
         } else if let Some(window) = self.window_for_surface(surface) {
             window.on_commit();
@@ -1063,7 +1072,7 @@ impl SayukiState {
             .unwrap_or_else(|| self.primary_output_geometry())
     }
 
-    fn output_for_window(&self, window: &Window) -> Option<Output> {
+    pub(crate) fn output_for_window(&self, window: &Window) -> Option<Output> {
         let rect = self.space().element_geometry(window)?;
         self.output_for_rect(rect)
     }

@@ -390,6 +390,7 @@ impl SessionLockHandler for SayukiState {
             Some(surface.wl_surface().clone()),
             SERIAL_COUNTER.next_serial(),
         );
+        self.set_focused_window(None);
         self.lock_surfaces.push((surface, output));
     }
 }

@@ -6,7 +6,7 @@
 //! focused; as a descendant of `state` they still reach the private
 //! `SayukiState` fields and helpers directly.
 
-use sayuki_ipc::{Event, WorkspaceId};
+use sayuki_ipc::{Event, WindowId, WorkspaceId};
 use std::path::Path;
 
 use smithay::{
@@ -35,12 +35,14 @@ impl SayukiState {
         if self.is_locked() {
             let surface = self.lock_surface_under(location);
             keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
+            self.set_focused_window(None);
             return;
         }
         if let Some(surface) = self.exclusive_layer_focus().or_else(|| {
             self.layer_keyboard_focus_under(location, &[WlrLayer::Overlay, WlrLayer::Top])
         }) {
             keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            self.set_focused_window(None);
             return;
         }
 
@@ -56,6 +58,7 @@ impl SayukiState {
             } else {
                 keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
             }
+            self.set_focused_window(None);
             return;
         };
 
@@ -90,9 +93,19 @@ impl SayukiState {
                 None
             }
         };
+        self.set_focused_window(focused_id);
+    }
+
+    /// Update which toplevel is considered focused — the IPC `WindowFocused`
+    /// event and the foreign-toplevel `activated` state — emitting only on a
+    /// real change. Keyboard focus is set separately by callers, since some
+    /// targets (layer surfaces, the lock screen) take keyboard focus while no
+    /// toplevel is focused.
+    pub(crate) fn set_focused_window(&mut self, focused_id: Option<WindowId>) {
         if self.focused_ipc != focused_id {
             self.focused_ipc = focused_id;
             self.emit_event(Event::WindowFocused { id: focused_id });
+            self.refresh_all_wlr_toplevels();
         }
     }
 
@@ -127,7 +140,7 @@ impl SayukiState {
         }
     }
 
-    pub(super) fn switch_workspace(&mut self, reference: WorkspaceRef) {
+    pub(crate) fn switch_workspace(&mut self, reference: WorkspaceRef) {
         let target = self.wm.canvas_for(reference);
         if self.wm.is_active(target) {
             return;
