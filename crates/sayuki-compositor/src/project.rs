@@ -22,6 +22,7 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::wm::LayoutMode;
 pub(crate) use sayuki_wm::project::{CanvasHooks, HookCmd, ProjectContext, WindowRule};
 
 /// A central `[[project]]` entry (built in `config.rs`). Inherently trusted.
@@ -31,6 +32,9 @@ pub(crate) struct ProjectConfig {
     pub(crate) path: PathBuf,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) on_init: Option<HookCmd>,
+    /// Initial layout mode for this project canvas (central config; the
+    /// `.sayuki` `layout` overrides it when present).
+    pub(crate) layout: Option<LayoutMode>,
 }
 
 /// A discovered `<dir>/.sayuki` file: what the project *looks like*.
@@ -74,9 +78,15 @@ pub(crate) fn resolve_context(
     sayuki: Option<SayukiProject>,
 ) -> ProjectContext {
     let central_on_init = central.as_ref().and_then(|config| config.on_init.clone());
-    let (sayuki_on_init, apps, rules) = match sayuki {
-        Some(sayuki) => (sayuki.on_init, sayuki.apps, sayuki.window_rules),
-        None => (None, Vec::new(), Vec::new()),
+    let central_layout = central.as_ref().and_then(|config| config.layout);
+    let (sayuki_on_init, apps, rules, sayuki_layout) = match sayuki {
+        Some(sayuki) => (
+            sayuki.on_init,
+            sayuki.apps,
+            sayuki.window_rules,
+            sayuki.layout.as_deref().map(parse_layout),
+        ),
+        None => (None, Vec::new(), Vec::new(), None),
     };
 
     ProjectContext {
@@ -88,6 +98,21 @@ pub(crate) fn resolve_context(
         },
         rules,
         apps,
+        layout: sayuki_layout.or(central_layout).unwrap_or_default(),
+    }
+}
+
+/// Parse a project `layout` hint into a [`LayoutMode`]. Unknown values fall back
+/// to floating (the default) so a typo never silently tiles a project.
+pub(crate) fn parse_layout(value: &str) -> LayoutMode {
+    match value
+        .trim()
+        .trim_start_matches('#')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "tiling" | "tiled" | "tile" => LayoutMode::Tiling,
+        _ => LayoutMode::Floating,
     }
 }
 
@@ -198,6 +223,7 @@ mod tests {
             path: PathBuf::from("/p"),
             env: vec![("RUST_LOG".to_owned(), "debug".to_owned())],
             on_init: None,
+            layout: None,
         }
     }
 
@@ -279,5 +305,61 @@ mod tests {
     fn content_hash_is_stable_and_distinguishes() {
         assert_eq!(content_hash("a"), content_hash("a"));
         assert_ne!(content_hash("a"), content_hash("b"));
+    }
+
+    #[test]
+    fn parse_layout_recognizes_tiling_and_defaults_floating() {
+        assert_eq!(parse_layout("tiling"), LayoutMode::Tiling);
+        assert_eq!(parse_layout("#tiling"), LayoutMode::Tiling);
+        assert_eq!(parse_layout(" Floating "), LayoutMode::Floating);
+        // Unknown values fall back to floating so a typo never silently tiles.
+        assert_eq!(parse_layout("nonsense"), LayoutMode::Floating);
+    }
+
+    #[test]
+    fn resolve_context_merges_layout() {
+        // A `.sayuki` layout wins over the central one.
+        let central = ProjectConfig {
+            layout: Some(LayoutMode::Floating),
+            ..config()
+        };
+        let sayuki = SayukiProject {
+            layout: Some("tiling".to_owned()),
+            ..SayukiProject::default()
+        };
+        assert_eq!(
+            resolve_context(Some(central), Some(sayuki)).layout,
+            LayoutMode::Tiling
+        );
+        // Central layout is the fallback when `.sayuki` omits it.
+        let central = ProjectConfig {
+            layout: Some(LayoutMode::Tiling),
+            ..config()
+        };
+        assert_eq!(
+            resolve_context(Some(central), None).layout,
+            LayoutMode::Tiling
+        );
+        // Neither set: floating default.
+        assert_eq!(
+            resolve_context(Some(config()), None).layout,
+            LayoutMode::Floating
+        );
+    }
+
+    #[test]
+    fn sayuki_project_parses_layout_and_rule_tiling() {
+        let project = SayukiProject::parse(
+            r#"{
+  layout = "tiling";
+  window_rule = [
+    { app_id = "mpv"; tiling = false; };
+  ];
+}"#,
+            None,
+        )
+        .expect("valid .sayuki");
+        assert_eq!(project.layout.as_deref(), Some("tiling"));
+        assert_eq!(project.window_rules[0].tiling, Some(false));
     }
 }

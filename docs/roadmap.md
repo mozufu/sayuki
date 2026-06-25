@@ -230,7 +230,7 @@ foreign-toplevel management and tiling.
   enumerate, raise, and close windows. Minimize and `set_rectangle` are
   intentional no-ops (the canvas model has no minimize); the `parent` event is
   never emitted.
-- [ ] **Tiling layouts** (from M5b) — first-class tiling alongside the floating
+- [x] **Tiling layouts** (from M5b) — first-class tiling alongside the floating
   canvas model; snap/swap remains the floating-first default; tiling is
   opt-in per workspace or via window rules; reference `niri`'s column layout and
   `river`'s layout protocol for the policy shape.

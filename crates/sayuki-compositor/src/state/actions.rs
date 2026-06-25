@@ -20,7 +20,7 @@ use super::{SayukiState, set_window_size};
 use crate::{
     render,
     wm::{
-        PanCouple, WorkspaceRef,
+        LayoutMode, PanCouple, WorkspaceRef,
         focus::CycleDirection,
         pin::{self, Pinned, ViewportAnchor},
         snap,
@@ -79,6 +79,9 @@ impl SayukiState {
         let serial = SERIAL_COUNTER.next_serial();
         let focused_id = match &window {
             Some(window) => {
+                // Keep the tiling cursor on the focused window so column
+                // navigation starts from the right place (no-op when floating).
+                self.wm.active_mut().tiling_mut().focus(window);
                 self.space_mut().raise_element(window, true);
                 self.reveal_window(window);
                 self.send_pending_window_configures();
@@ -165,6 +168,7 @@ impl SayukiState {
             id: WorkspaceId(self.wm.active().id().raw()),
         });
         self.apply_focus(focus);
+        self.relayout_active_tiling();
         self.send_pending_window_configures();
     }
 
@@ -187,10 +191,14 @@ impl SayukiState {
         canvas
             .space_mut()
             .map_element(window.clone(), location, false);
+        if canvas.layout_mode() == LayoutMode::Tiling {
+            canvas.tile(window.clone());
+        }
         canvas.focus(window);
 
         let focus = self.wm.active().focused().cloned();
         self.apply_focus(focus);
+        self.relayout_active_tiling();
         self.send_pending_window_configures();
     }
 
@@ -299,6 +307,7 @@ impl SayukiState {
             output: output.name(),
             anchor,
         });
+        self.relayout_active_tiling();
     }
 
     /// Re-map an output at its viewport's location and recompute the canvas
@@ -491,5 +500,105 @@ impl SayukiState {
             PanCouple::Linked => self.collect_outputs(),
             PanCouple::Independent => self.focused_output().into_iter().collect(),
         }
+    }
+
+    /// Focus the tiled neighbour in `direction`: Left/Right move between
+    /// columns (clamping the row), Up/Down within the active column. A no-op
+    /// when nothing is tiled or focus is already at the edge.
+    pub(super) fn focus_tile(&mut self, direction: Direction) {
+        let window = self
+            .wm
+            .active_mut()
+            .tiling_mut()
+            .focus_direction(direction)
+            .cloned();
+        if let Some(window) = window {
+            self.focus_window(window);
+        }
+    }
+
+    /// Move the focused tiled window in `direction`, re-tiling and keeping it
+    /// focused. A no-op when the focused window is floating or the move is
+    /// blocked at an edge.
+    pub(super) fn move_tile(&mut self, direction: Direction) {
+        let Some(focused) = self.wm.active().focused().cloned() else {
+            return;
+        };
+        if !self.wm.active().is_tiled(&focused) {
+            return;
+        }
+        self.wm.active_mut().tiling_mut().focus(&focused);
+        if self.wm.active_mut().tiling_mut().move_direction(direction) {
+            self.relayout_active_tiling();
+            self.focus_window(focused);
+        }
+    }
+
+    /// Toggle the focused window between tiled and floating on the active
+    /// canvas. A floated window keeps its last tiled rectangle; a newly tiled
+    /// window joins the column layout.
+    pub(super) fn toggle_floating(&mut self) {
+        let Some(window) = self.wm.active().focused().cloned() else {
+            return;
+        };
+        // A pinned HUD has no float/tile state to toggle.
+        if self.wm.active().is_pinned(&window) {
+            return;
+        }
+        let canvas = self.wm.active_mut();
+        if canvas.is_tiled(&window) {
+            canvas.untile(&window);
+        } else {
+            canvas.tile(window.clone());
+        }
+        self.relayout_active_tiling();
+        self.focus_window(window);
+    }
+
+    /// Toggle the active canvas between floating and tiling. Entering tiling
+    /// tiles every floating, non-pinned window; leaving it releases the tiled
+    /// windows as floating ones at their current rectangles.
+    pub(super) fn toggle_tiling(&mut self) {
+        let mode = self.wm.active_mut().toggle_layout_mode();
+        match mode {
+            LayoutMode::Tiling => {
+                let windows: Vec<Window> = self.space().elements().cloned().collect();
+                let canvas = self.wm.active_mut();
+                for window in windows {
+                    if !canvas.is_pinned(&window) {
+                        canvas.tile(window);
+                    }
+                }
+                self.relayout_active_tiling();
+            }
+            LayoutMode::Floating => {
+                let windows: Vec<Window> = self.wm.active().tiling().windows().cloned().collect();
+                let canvas = self.wm.active_mut();
+                for window in &windows {
+                    canvas.untile(window);
+                }
+            }
+        }
+    }
+
+    /// Re-tile the active canvas's tiled windows into the focused output's work
+    /// area and flush the resulting xdg configures. A no-op when nothing is
+    /// tiled; floating windows are untouched.
+    pub(crate) fn relayout_active_tiling(&mut self) {
+        if self.wm.active().tiling().is_empty() {
+            return;
+        }
+        let area = self.tiling_area();
+        let gap = self.wm.tiling_config().gap;
+        self.wm.active_mut().apply_tiling(area, gap);
+        self.send_pending_window_configures();
+    }
+
+    /// The canvas region tiled windows fill: the focused output's work area
+    /// (panels excluded), falling back to the primary output.
+    fn tiling_area(&self) -> Rectangle<i32, Logical> {
+        self.focused_output()
+            .and_then(|output| self.output_work_area(&output))
+            .unwrap_or_else(|| self.primary_work_area())
     }
 }

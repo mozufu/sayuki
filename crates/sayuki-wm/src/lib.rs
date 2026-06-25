@@ -16,6 +16,7 @@ pub mod pin;
 pub mod project;
 pub mod snap;
 pub mod swap;
+pub mod tiling;
 pub mod viewport;
 
 use std::{
@@ -34,6 +35,7 @@ use crate::{
     pin::Pinned,
     project::{CanvasHooks, ProjectContext, WindowRule},
     snap::SnapConfig,
+    tiling::{LayoutMode, TilingConfig, TilingLayout},
     viewport::Viewport,
 };
 
@@ -102,6 +104,12 @@ pub struct Canvas {
     apps: Vec<String>,
     /// One-shot guard so `on_init`/`apps` run only on the first activation.
     initialized: bool,
+    /// Window arrangement mode for this canvas; floating by default.
+    layout_mode: LayoutMode,
+    /// The column structure of this canvas's tiled windows. A window is
+    /// floating iff it is a `space` element that is *not* a member here, so
+    /// floating and tiled windows coexist on the same canvas.
+    tiling: TilingLayout<Window>,
 }
 
 impl Canvas {
@@ -121,6 +129,8 @@ impl Canvas {
             rules: Vec::new(),
             apps: Vec::new(),
             initialized: false,
+            layout_mode: LayoutMode::default(),
+            tiling: TilingLayout::new(),
         }
     }
 
@@ -132,6 +142,7 @@ impl Canvas {
             hooks: context.hooks,
             rules: context.rules,
             apps: context.apps,
+            layout_mode: context.layout,
             ..Self::new(id, name)
         }
     }
@@ -144,6 +155,7 @@ impl Canvas {
         self.hooks = context.hooks;
         self.rules = context.rules;
         self.apps = context.apps;
+        self.layout_mode = context.layout;
     }
 
     pub fn id(&self) -> CanvasId {
@@ -259,6 +271,7 @@ impl Canvas {
     /// `true` when it was the focused window.
     pub fn remove(&mut self, window: &Window) -> bool {
         self.pinned.retain(|pinned| &pinned.window != window);
+        self.tiling.remove(window);
         focus::remove(&mut self.focus, window)
     }
 
@@ -295,6 +308,9 @@ impl Canvas {
     }
 
     pub fn add_pin(&mut self, pinned: Pinned) {
+        // A pinned HUD is never a tiling member, so pinning releases it from the
+        // column layout (tiling and pinning are mutually exclusive placements).
+        self.tiling.remove(&pinned.window);
         self.pinned
             .retain(|existing| existing.window != pinned.window);
         self.pinned.push(pinned);
@@ -305,6 +321,73 @@ impl Canvas {
         self.pinned.retain(|pinned| &pinned.window != window);
         self.pinned.len() != before
     }
+
+    /// This canvas's window arrangement mode.
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.layout_mode
+    }
+
+    pub fn set_layout_mode(&mut self, mode: LayoutMode) {
+        self.layout_mode = mode;
+    }
+
+    /// Flip floating <-> tiling, returning the new mode.
+    pub fn toggle_layout_mode(&mut self) -> LayoutMode {
+        self.layout_mode = self.layout_mode.toggled();
+        self.layout_mode
+    }
+
+    /// The column structure of this canvas's tiled windows.
+    pub fn tiling(&self) -> &TilingLayout<Window> {
+        &self.tiling
+    }
+
+    pub fn tiling_mut(&mut self) -> &mut TilingLayout<Window> {
+        &mut self.tiling
+    }
+
+    pub fn is_tiled(&self, window: &Window) -> bool {
+        self.tiling.contains(window)
+    }
+
+    /// Add `window` to the tiling column structure (a no-op if already tiled).
+    pub fn tile(&mut self, window: Window) {
+        self.tiling.insert(window);
+    }
+
+    /// Remove `window` from the tiling structure, leaving it a floating `space`
+    /// element at its current location. Returns whether it was tiled.
+    pub fn untile(&mut self, window: &Window) -> bool {
+        self.tiling.remove(window)
+    }
+
+    /// The first window rule that forces a tiling decision for `app_id`/`title`:
+    /// `Some(true)` tiles, `Some(false)` floats, `None` inherits the canvas
+    /// layout mode.
+    pub fn rule_tiling(&self, app_id: Option<&str>, title: Option<&str>) -> Option<bool> {
+        self.rules.iter().find_map(|rule| {
+            if rule.matches(app_id, title) {
+                rule.tiling
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Re-tile: lay the tiled windows into `area` with `gap`, writing each one's
+    /// new location into the `space` and its target size into the xdg toplevel's
+    /// pending state (the caller flushes the configures). Floating windows are
+    /// untouched.
+    pub fn apply_tiling(&mut self, area: Rectangle<i32, Logical>, gap: i32) {
+        for (window, rect) in self.tiling.geometry(area, gap) {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    state.size = Some(rect.size);
+                });
+            }
+            self.space.map_element(window, rect.loc, false);
+        }
+    }
 }
 
 /// Owns every canvas and the active selection plus shared WM policy config.
@@ -314,6 +397,8 @@ pub struct WindowManager {
     next_id: u32,
     pan_couple: PanCouple,
     snap: SnapConfig,
+    /// Tiling sizing policy shared by every canvas.
+    tiling_config: TilingConfig,
 }
 
 impl WindowManager {
@@ -323,6 +408,7 @@ impl WindowManager {
         outputs: &[Output],
         pan_couple: PanCouple,
         snap: SnapConfig,
+        tiling_config: TilingConfig,
         projects: Vec<(String, ProjectContext)>,
     ) -> Self {
         let id = CanvasId(0);
@@ -350,6 +436,7 @@ impl WindowManager {
             next_id,
             pan_couple,
             snap,
+            tiling_config,
         }
     }
 
@@ -367,6 +454,14 @@ impl WindowManager {
 
     pub fn set_snap(&mut self, snap: SnapConfig) {
         self.snap = snap;
+    }
+
+    pub fn tiling_config(&self) -> TilingConfig {
+        self.tiling_config
+    }
+
+    pub fn set_tiling_config(&mut self, tiling: TilingConfig) {
+        self.tiling_config = tiling;
     }
 
     fn index_of(&self, id: CanvasId) -> usize {
@@ -510,6 +605,16 @@ impl WindowManager {
             .cloned()
     }
 
+    /// The id of the canvas whose space currently holds `window`, if any. Used
+    /// when a still-pending window may have been relocated to another canvas
+    /// before its first qualifying commit.
+    pub fn canvas_of(&self, window: &Window) -> Option<CanvasId> {
+        self.canvases
+            .iter()
+            .find(|canvas| canvas.space.elements().any(|element| element == window))
+            .map(|canvas| canvas.id)
+    }
+
     /// Remove a window from whichever canvas holds it: unmap from the space and
     /// drop it from the focus stack and pin list. Returns `true` when the window
     /// was the active canvas's focused window, so the caller re-focuses the new
@@ -539,6 +644,7 @@ mod tests {
                 app_id: Some("firefox".to_owned()),
                 title: None,
                 pin: true,
+                tiling: None,
             }],
             ..ProjectContext::default()
         }
@@ -550,6 +656,7 @@ mod tests {
             &[],
             PanCouple::Independent,
             SnapConfig::default(),
+            TilingConfig::default(),
             vec![("sayuki".to_owned(), project_with_rule())],
         );
 
@@ -569,6 +676,7 @@ mod tests {
             &[],
             PanCouple::Independent,
             SnapConfig::default(),
+            TilingConfig::default(),
             vec![("sayuki".to_owned(), project_with_rule())],
         );
 
@@ -579,5 +687,38 @@ mod tests {
         // A numeric reference resolves to (or creates) a distinct bare canvas.
         let by_index = manager.canvas_for(WorkspaceRef::Index(2));
         assert_ne!(by_index, by_name);
+    }
+
+    #[test]
+    fn project_layout_and_rule_tiling_drive_the_canvas() {
+        let context = ProjectContext {
+            layout: LayoutMode::Tiling,
+            rules: vec![WindowRule {
+                app_id: Some("mpv".to_owned()),
+                title: None,
+                pin: false,
+                tiling: Some(false),
+            }],
+            ..ProjectContext::default()
+        };
+        let mut manager = WindowManager::new(
+            &[],
+            PanCouple::Independent,
+            SnapConfig::default(),
+            TilingConfig::default(),
+            vec![("dev".to_owned(), context)],
+        );
+        let id = manager.canvas_for(WorkspaceRef::Name("dev".to_owned()));
+        let canvas = manager.canvas_mut(id);
+
+        // The project context seeds the canvas's layout mode.
+        assert_eq!(canvas.layout_mode(), LayoutMode::Tiling);
+        // A matching rule forces its window to float even on a tiling canvas;
+        // non-matching windows inherit the canvas mode (no override).
+        assert_eq!(canvas.rule_tiling(Some("mpv"), None), Some(false));
+        assert_eq!(canvas.rule_tiling(Some("ghostty"), None), None);
+        // Toggling flips the mode and reports the new value.
+        assert_eq!(canvas.toggle_layout_mode(), LayoutMode::Floating);
+        assert_eq!(canvas.layout_mode(), LayoutMode::Floating);
     }
 }

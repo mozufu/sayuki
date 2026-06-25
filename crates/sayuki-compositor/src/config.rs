@@ -10,7 +10,7 @@ use smithay::input::keyboard::XkbConfig;
 use crate::{
     output::OutputPolicy,
     project::ProjectConfig,
-    wm::{PanCouple, WorkspaceRef, snap::SnapConfig},
+    wm::{PanCouple, WorkspaceRef, snap::SnapConfig, tiling::TilingConfig},
 };
 
 const DEFAULT_REPEAT_DELAY: i32 = 500;
@@ -25,6 +25,7 @@ pub(crate) struct SayukiConfig {
     pub(crate) keybindings: Vec<KeybindingConfig>,
     pub(crate) pan_couple: PanCouple,
     pub(crate) snap: SnapConfig,
+    pub(crate) tiling: TilingConfig,
     pub(crate) projects: Vec<ProjectConfig>,
     pub(crate) outputs: Vec<OutputPolicy>,
 }
@@ -63,6 +64,10 @@ pub(crate) enum BindingActionConfig {
     SwapWindow { target: String },
     FocusNext,
     FocusPrev,
+    FocusTile { direction: String },
+    MoveTile { direction: String },
+    ToggleFloating,
+    ToggleTiling,
     ToggleHelp,
 }
 
@@ -75,6 +80,8 @@ struct RawConfig {
     pan: RawPanConfig,
     #[serde(default)]
     snap: RawSnapConfig,
+    #[serde(default)]
+    tiling: RawTilingConfig,
     project: Option<Vec<RawProject>>,
     output: Option<Vec<RawOutput>>,
 }
@@ -91,7 +98,10 @@ struct RawKeybindingConfig {
 #[serde(untagged)]
 enum RawAction {
     Atom(String),
-    Tagged { tag: String, payload: serde_json::Value },
+    Tagged {
+        tag: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +111,7 @@ struct RawProject {
     #[serde(default)]
     env: std::collections::HashMap<String, String>,
     on_init: Option<crate::project::HookCmd>,
+    layout: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +139,12 @@ struct RawSnapConfig {
 impl Default for RawSnapConfig {
     fn default() -> Self {
         let d = crate::wm::snap::SnapConfig::default();
-        Self { threshold: d.threshold, grid: d.grid, to_windows: d.to_windows, to_edges: d.to_edges }
+        Self {
+            threshold: d.threshold,
+            grid: d.grid,
+            to_windows: d.to_windows,
+            to_edges: d.to_edges,
+        }
     }
 }
 
@@ -139,6 +155,28 @@ impl RawSnapConfig {
             grid: self.grid,
             to_windows: self.to_windows,
             to_edges: self.to_edges,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct RawTilingConfig {
+    gap: i32,
+}
+
+impl Default for RawTilingConfig {
+    fn default() -> Self {
+        Self {
+            gap: TilingConfig::default().gap,
+        }
+    }
+}
+
+impl RawTilingConfig {
+    fn into_tiling(self) -> TilingConfig {
+        TilingConfig {
+            gap: self.gap.max(0),
         }
     }
 }
@@ -195,6 +233,7 @@ impl Default for SayukiConfig {
             keybindings: default_keybindings(),
             pan_couple: PanCouple::default(),
             snap: SnapConfig::default(),
+            tiling: TilingConfig::default(),
             projects: Vec::new(),
             outputs: Vec::new(),
         }
@@ -259,6 +298,7 @@ impl RawConfig {
             keybindings,
             pan_couple: self.pan.into_couple()?,
             snap: self.snap.into_snap(),
+            tiling: self.tiling.into_tiling(),
             projects,
             outputs,
         })
@@ -270,7 +310,12 @@ impl RawPanConfig {
         let Some(couple) = self.couple else {
             return Ok(PanCouple::default());
         };
-        match couple.trim_start_matches('#').trim().to_ascii_lowercase().as_str() {
+        match couple
+            .trim_start_matches('#')
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "independent" => Ok(PanCouple::Independent),
             "linked" => Ok(PanCouple::Linked),
             other => Err(invalid_keybinding(format!(
@@ -283,41 +328,52 @@ impl RawPanConfig {
 impl RawKeybindingConfig {
     fn try_into_config(self) -> Result<KeybindingConfig, io::Error> {
         let action = self.action.try_into_binding_action(&self.keys)?;
-        Ok(KeybindingConfig { keys: self.keys, action })
+        Ok(KeybindingConfig {
+            keys: self.keys,
+            action,
+        })
     }
 }
 
 impl RawAction {
     fn try_into_binding_action(self, keys: &str) -> Result<BindingActionConfig, io::Error> {
         // Helper: pull a field from a payload object.
-        fn str_field<'a>(p: &'a serde_json::Value, field: &str, keys: &str) -> Result<&'a str, io::Error> {
-            p.get(field)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+        fn str_field<'a>(
+            p: &'a serde_json::Value,
+            field: &str,
+            keys: &str,
+        ) -> Result<&'a str, io::Error> {
+            p.get(field).and_then(|v| v.as_str()).ok_or_else(|| {
+                invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`"))
+            })
         }
         fn i32_field(p: &serde_json::Value, field: &str, keys: &str) -> Result<i32, io::Error> {
             p.get(field)
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
-                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+                .ok_or_else(|| {
+                    invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`"))
+                })
         }
         fn f64_field(p: &serde_json::Value, field: &str, keys: &str) -> Result<f64, io::Error> {
-            p.get(field)
-                .and_then(|v| v.as_f64())
-                .ok_or_else(|| invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`")))
+            p.get(field).and_then(|v| v.as_f64()).ok_or_else(|| {
+                invalid_keybinding(format!("keybinding `{keys}`: missing `{field}`"))
+            })
         }
 
         match self {
             // ── zero-payload atoms ──────────────────────────────────────────
             RawAction::Atom(atom) => match atom.trim_start_matches('#') {
-                "quit"                         => Ok(BindingActionConfig::Quit),
-                "begin_move" | "move"          => Ok(BindingActionConfig::BeginMove),
+                "quit" => Ok(BindingActionConfig::Quit),
+                "begin_move" | "move" => Ok(BindingActionConfig::BeginMove),
                 "toggle_overview" | "overview" => Ok(BindingActionConfig::ToggleOverview),
-                "toggle_minimap"  | "minimap"  => Ok(BindingActionConfig::ToggleMinimap),
-                "toggle_pin"      | "pin"      => Ok(BindingActionConfig::TogglePin),
-                "focus_next"                   => Ok(BindingActionConfig::FocusNext),
-                "focus_prev" | "focus_previous"=> Ok(BindingActionConfig::FocusPrev),
-                "toggle_help" | "help"         => Ok(BindingActionConfig::ToggleHelp),
+                "toggle_minimap" | "minimap" => Ok(BindingActionConfig::ToggleMinimap),
+                "toggle_pin" | "pin" => Ok(BindingActionConfig::TogglePin),
+                "focus_next" => Ok(BindingActionConfig::FocusNext),
+                "focus_prev" | "focus_previous" => Ok(BindingActionConfig::FocusPrev),
+                "toggle_floating" | "float" => Ok(BindingActionConfig::ToggleFloating),
+                "toggle_tiling" | "tiling" => Ok(BindingActionConfig::ToggleTiling),
+                "toggle_help" | "help" => Ok(BindingActionConfig::ToggleHelp),
                 other => Err(invalid_keybinding(format!(
                     "keybinding `{keys}` uses unknown action `{other}`"
                 ))),
@@ -328,7 +384,9 @@ impl RawAction {
                 "spawn" => {
                     let cmd = str_field(&p, "command", keys)?;
                     if cmd.is_empty() {
-                        return Err(invalid_keybinding(format!("keybinding `{keys}`: empty spawn command")));
+                        return Err(invalid_keybinding(format!(
+                            "keybinding `{keys}`: empty spawn command"
+                        )));
                     }
                     Ok(BindingActionConfig::Spawn {
                         command: vec!["sh".to_owned(), "-c".to_owned(), cmd.to_owned()],
@@ -336,17 +394,26 @@ impl RawAction {
                 }
                 "spawn_args" => {
                     let args: Vec<String> = serde_json::from_value(
-                        p.get("args").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+                        p.get("args")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Array(vec![])),
                     )
-                    .map_err(|e| invalid_keybinding(format!("keybinding `{keys}` spawn_args: {e}")))?;
+                    .map_err(|e| {
+                        invalid_keybinding(format!("keybinding `{keys}` spawn_args: {e}"))
+                    })?;
                     if args.is_empty() || args.iter().any(|a| a.is_empty()) {
-                        return Err(invalid_keybinding(format!("keybinding `{keys}`: empty spawn_args")));
+                        return Err(invalid_keybinding(format!(
+                            "keybinding `{keys}`: empty spawn_args"
+                        )));
                     }
                     Ok(BindingActionConfig::Spawn { command: args })
                 }
                 "begin_resize" | "resize" => {
-                    let edges = p.get("edges").and_then(|v| v.as_str())
-                        .unwrap_or("bottom-right").to_owned();
+                    let edges = p
+                        .get("edges")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("bottom-right")
+                        .to_owned();
                     Ok(BindingActionConfig::BeginResize { edges })
                 }
                 "switch_workspace_index" => Ok(BindingActionConfig::SwitchWorkspace {
@@ -383,6 +450,12 @@ impl RawAction {
                 "swap_window" | "swap" => Ok(BindingActionConfig::SwapWindow {
                     target: str_field(&p, "target", keys)?.to_owned(),
                 }),
+                "focus_tile" => Ok(BindingActionConfig::FocusTile {
+                    direction: str_field(&p, "direction", keys)?.to_owned(),
+                }),
+                "move_tile" => Ok(BindingActionConfig::MoveTile {
+                    direction: str_field(&p, "direction", keys)?.to_owned(),
+                }),
                 other => Err(invalid_keybinding(format!(
                     "keybinding `{keys}` uses unknown action `{other}`"
                 ))),
@@ -398,6 +471,7 @@ impl RawProject {
             path: expand_tilde(&self.path),
             env: self.env.into_iter().collect(),
             on_init: self.on_init,
+            layout: self.layout.as_deref().map(crate::project::parse_layout),
         }
     }
 }
@@ -491,6 +565,27 @@ fn default_keybindings() -> Vec<KeybindingConfig> {
         },
     ]);
 
+    // Tiling actions (vim-style): navigate and move within the column layout,
+    // plus per-window float and per-canvas tiling toggles.
+    bindings.extend([
+        tile_focus("Alt+H", "left"),
+        tile_focus("Alt+L", "right"),
+        tile_focus("Alt+K", "up"),
+        tile_focus("Alt+J", "down"),
+        tile_move("Alt+Shift+H", "left"),
+        tile_move("Alt+Shift+L", "right"),
+        tile_move("Alt+Shift+K", "up"),
+        tile_move("Alt+Shift+J", "down"),
+        KeybindingConfig {
+            keys: "Alt+T".to_owned(),
+            action: BindingActionConfig::ToggleTiling,
+        },
+        KeybindingConfig {
+            keys: "Alt+Shift+F".to_owned(),
+            action: BindingActionConfig::ToggleFloating,
+        },
+    ]);
+
     bindings
 }
 
@@ -498,6 +593,24 @@ fn pan_binding(keys: &str, dx: i32, dy: i32) -> KeybindingConfig {
     KeybindingConfig {
         keys: keys.to_owned(),
         action: BindingActionConfig::PanViewport { dx, dy },
+    }
+}
+
+fn tile_focus(keys: &str, direction: &str) -> KeybindingConfig {
+    KeybindingConfig {
+        keys: keys.to_owned(),
+        action: BindingActionConfig::FocusTile {
+            direction: direction.to_owned(),
+        },
+    }
+}
+
+fn tile_move(keys: &str, direction: &str) -> KeybindingConfig {
+    KeybindingConfig {
+        keys: keys.to_owned(),
+        action: BindingActionConfig::MoveTile {
+            direction: direction.to_owned(),
+        },
     }
 }
 

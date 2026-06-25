@@ -36,6 +36,14 @@ pub(crate) fn action_from_config(
         }),
         BindingActionConfig::FocusNext => Ok(sayuki_ipc::Action::FocusNext),
         BindingActionConfig::FocusPrev => Ok(sayuki_ipc::Action::FocusPrev),
+        BindingActionConfig::FocusTile { direction } => Ok(sayuki_ipc::Action::FocusTile {
+            direction: parse_direction(direction)?,
+        }),
+        BindingActionConfig::MoveTile { direction } => Ok(sayuki_ipc::Action::MoveTile {
+            direction: parse_direction(direction)?,
+        }),
+        BindingActionConfig::ToggleFloating => Ok(sayuki_ipc::Action::ToggleFloating),
+        BindingActionConfig::ToggleTiling => Ok(sayuki_ipc::Action::ToggleTiling),
         BindingActionConfig::ToggleHelp => Ok(sayuki_ipc::Action::ToggleHelp),
     }
 }
@@ -58,6 +66,10 @@ pub(crate) fn action_label(action: &sayuki_ipc::Action) -> &'static str {
         sayuki_ipc::Action::SwapWindow { .. } => "Swap focused window",
         sayuki_ipc::Action::FocusNext => "Focus next window",
         sayuki_ipc::Action::FocusPrev => "Focus previous window",
+        sayuki_ipc::Action::FocusTile { .. } => "Focus tiled window",
+        sayuki_ipc::Action::MoveTile { .. } => "Move tiled window",
+        sayuki_ipc::Action::ToggleFloating => "Float or tile window",
+        sayuki_ipc::Action::ToggleTiling => "Toggle tiling layout",
         sayuki_ipc::Action::ToggleHelp => "Toggle keymap help",
     }
 }
@@ -109,6 +121,18 @@ fn parse_swap_target(target: &str) -> Result<sayuki_ipc::SwapTarget, String> {
     };
 
     Ok(swap)
+}
+
+fn parse_direction(direction: &str) -> Result<sayuki_ipc::Direction, String> {
+    match direction.trim().to_ascii_lowercase().as_str() {
+        "left" => Ok(sayuki_ipc::Direction::Left),
+        "right" => Ok(sayuki_ipc::Direction::Right),
+        "up" => Ok(sayuki_ipc::Direction::Up),
+        "down" => Ok(sayuki_ipc::Direction::Down),
+        _ => Err(format!(
+            "unknown direction `{direction}`; expected one of left, right, up, down"
+        )),
+    }
 }
 
 fn ipc_workspace_ref(reference: crate::wm::WorkspaceRef) -> sayuki_ipc::WorkspaceRef {

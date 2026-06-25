@@ -4,5 +4,7 @@
 //! lives in `state/actions.rs` and `state/project.rs`.
 
 pub(crate) use sayuki_wm::{
-    Canvas, CanvasId, PanCouple, WindowManager, WorkspaceRef, focus, pin, snap, swap, viewport,
+    Canvas, CanvasId, PanCouple, WindowManager, WorkspaceRef, focus, pin, snap, swap,
+    tiling::{self, LayoutMode},
+    viewport,
 };

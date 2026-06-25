@@ -245,7 +245,13 @@ impl SayukiState {
             output::apply_policy(output, &output_policies);
         }
         let projects = project::resolve_project_contexts(&config.projects);
-        let wm = WindowManager::new(&outputs, config.pan_couple, config.snap, projects);
+        let wm = WindowManager::new(
+            &outputs,
+            config.pan_couple,
+            config.snap,
+            config.tiling,
+            projects,
+        );
 
         Ok(Self {
             compositor_state,
@@ -357,6 +363,8 @@ impl SayukiState {
         // WM policy.
         self.wm.set_pan_couple(cfg.pan_couple);
         self.wm.set_snap(cfg.snap);
+        self.wm.set_tiling_config(cfg.tiling);
+        self.relayout_active_tiling();
 
         // Output policies: re-apply to every current output.
         self.output_policies = cfg.outputs;
@@ -553,6 +561,10 @@ impl SayukiState {
             Action::SwapWindow { target } => self.swap_focused(Self::swap_target_from_ipc(target)),
             Action::FocusNext => self.cycle_focus(CycleDirection::Forward),
             Action::FocusPrev => self.cycle_focus(CycleDirection::Backward),
+            Action::FocusTile { direction } => self.focus_tile(Self::direction_from_ipc(direction)),
+            Action::MoveTile { direction } => self.move_tile(Self::direction_from_ipc(direction)),
+            Action::ToggleFloating => self.toggle_floating(),
+            Action::ToggleTiling => self.toggle_tiling(),
             Action::ToggleHelp => self.help_visible = !self.help_visible,
         }
     }
@@ -606,7 +618,7 @@ impl SayukiState {
             app_id,
             title,
             workspace: WorkspaceId(canvas.id().raw()),
-            floating: true,
+            floating: !canvas.is_tiled(window),
             focused: canvas.focused() == Some(window),
             geometry: canvas.space().element_geometry(window).map(rect_from),
         })
@@ -950,6 +962,7 @@ impl SayukiState {
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
         }
+        self.relayout_active_tiling();
     }
 
     /// Place a new window at a free, staggered spot in the viewport under the

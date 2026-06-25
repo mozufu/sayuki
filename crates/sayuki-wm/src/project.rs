@@ -11,6 +11,8 @@
 
 use serde::Deserialize;
 
+use crate::tiling::LayoutMode;
+
 /// A hook or app command: either a shell line (`sh -c`) or an explicit argv.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
@@ -52,6 +54,10 @@ pub struct WindowRule {
     /// Route the matching surface back to this canvas.
     #[serde(default)]
     pub pin: bool,
+    /// Force the matching window tiled (`Some(true)`) or floating
+    /// (`Some(false)`), overriding the canvas layout mode; `None` inherits it.
+    #[serde(default)]
+    pub tiling: Option<bool>,
 }
 
 impl WindowRule {
@@ -83,6 +89,9 @@ pub struct ProjectContext {
     pub hooks: CanvasHooks,
     pub rules: Vec<WindowRule>,
     pub apps: Vec<String>,
+    /// The canvas's initial layout mode (project `layout = "floating" |
+    /// "tiling"`). Floating by default.
+    pub layout: LayoutMode,
 }
 
 #[cfg(test)]
@@ -107,6 +116,7 @@ mod tests {
             app_id: Some("firefox".to_owned()),
             title: None,
             pin: true,
+            tiling: None,
         };
         assert!(rule.matches(Some("firefox"), None));
         assert!(rule.matches(Some("org.mozilla.firefox"), Some("anything")));
@@ -120,6 +130,7 @@ mod tests {
             app_id: Some("firefox".to_owned()),
             title: Some("sayuki".to_owned()),
             pin: true,
+            tiling: None,
         };
         assert!(rule.matches(Some("firefox"), Some("sayuki — Mozilla")));
         // app_id matches but title does not.
@@ -132,6 +143,7 @@ mod tests {
             app_id: None,
             title: None,
             pin: true,
+            tiling: None,
         };
         assert!(!rule.matches(Some("firefox"), Some("anything")));
     }

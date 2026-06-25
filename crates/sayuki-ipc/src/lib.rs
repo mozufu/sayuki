@@ -87,7 +87,8 @@ pub struct WindowInfo {
     pub app_id: Option<String>,
     pub title: Option<String>,
     pub workspace: WorkspaceId,
-    // Tiling is deferred; all current toplevels are floating.
+    /// Whether the window floats freely; `false` means it is part of a tiling
+    /// column on its canvas.
     pub floating: bool,
     pub focused: bool,
     pub geometry: Option<Rect>,
@@ -176,6 +177,10 @@ pub enum Action {
     SwapWindow { target: SwapTarget },
     FocusNext,
     FocusPrev,
+    FocusTile { direction: Direction },
+    MoveTile { direction: Direction },
+    ToggleFloating,
+    ToggleTiling,
     ToggleHelp,
 }
 

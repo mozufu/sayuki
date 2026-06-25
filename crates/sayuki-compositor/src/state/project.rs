@@ -23,7 +23,7 @@ use crate::{
     input::spawn::SpawnContext,
     output,
     project::{ProjectConfig, ProjectContext, SayukiProject, TrustStore, resolve_context},
-    wm::{CanvasId, viewport},
+    wm::{CanvasId, LayoutMode, viewport},
 };
 
 impl SayukiState {
@@ -101,11 +101,20 @@ impl SayukiState {
         }
         self.pending_rules.remove(position);
 
-        if let Some(target) = self.wm.pin_target(app_id.as_deref(), title.as_deref())
-            && !self.wm.is_active(target)
-        {
-            self.reroute_window(window, target);
-        }
+        let target = match self.wm.pin_target(app_id.as_deref(), title.as_deref()) {
+            Some(target) if !self.wm.is_active(target) => {
+                self.reroute_window(window, target);
+                target
+            }
+            // No (or active) pin rule: apply policy where the window actually
+            // lives — a pre-commit MoveToWorkspace may have relocated it off the
+            // active canvas while it was still pending.
+            _ => self
+                .wm
+                .canvas_of(window)
+                .unwrap_or_else(|| self.wm.active().id()),
+        };
+        self.apply_tiling_policy(window, target, app_id.as_deref(), title.as_deref());
     }
 
     /// Move a mapped window to a project canvas (window-rule routing). Removal is
@@ -118,6 +127,32 @@ impl SayukiState {
         if was_active_focus {
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
+        }
+    }
+
+    /// Decide whether a freshly routed `window` tiles on `canvas_id`: a matching
+    /// window rule's `tiling` flag wins, else the canvas's layout mode. The
+    /// active canvas re-tiles immediately; an inactive target tiles lazily when
+    /// it is next shown.
+    fn apply_tiling_policy(
+        &mut self,
+        window: &Window,
+        canvas_id: CanvasId,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) {
+        let canvas = self.wm.canvas_mut(canvas_id);
+        let tile = match canvas.rule_tiling(app_id, title) {
+            Some(force) => force,
+            None => canvas.layout_mode() == LayoutMode::Tiling,
+        };
+        if tile {
+            canvas.tile(window.clone());
+        } else {
+            canvas.untile(window);
+        }
+        if self.wm.is_active(canvas_id) {
+            self.relayout_active_tiling();
         }
     }
 
