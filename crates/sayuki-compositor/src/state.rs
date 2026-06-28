@@ -88,6 +88,7 @@ use crate::{
     input::{actions::action_label, keybindings::KeybindingRegistry, spawn::ActionRunner},
     ipc::{ConnectionId, Subscribers},
     output::{self, OutputPolicy},
+    protocols::{ProjectAffinity, ProjectManagerState},
     render::{
         self, CursorRender,
         help::{HelpEntry, HelpMenu},
@@ -174,6 +175,11 @@ pub(crate) struct SayukiState {
     /// Captures recorded by `copy`/`copy_with_damage`, fulfilled at the end of
     /// the next render pass.
     pub(crate) pending_screencopy: Vec<Screencopy>,
+    /// Owns the `zsayuki_project_manager_v1` global.
+    _project_manager: ProjectManagerState,
+    /// Pending per-surface project affinity (`zsayuki_project_v1`), consumed
+    /// when each surface first maps.
+    pub(crate) project_affinity: Vec<ProjectAffinity>,
 }
 
 impl SayukiState {
@@ -215,8 +221,11 @@ impl SayukiState {
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&display_handle);
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let security_context_state =
-            SecurityContextState::new::<Self, _>(&display_handle, |_| true);
+            SecurityContextState::new::<Self, _>(&display_handle, |client| {
+                crate::wayland::is_client_trusted(client)
+            });
         let screencopy_state = ScreencopyManagerState::new(&display_handle);
+        let project_manager = ProjectManagerState::new(&display_handle);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
@@ -310,6 +319,8 @@ impl SayukiState {
             focused_ipc: None,
             _screencopy_state: screencopy_state,
             pending_screencopy: Vec::new(),
+            _project_manager: project_manager,
+            project_affinity: Vec::new(),
         })
     }
 
@@ -991,6 +1002,9 @@ impl SayukiState {
     }
 
     pub(crate) fn handle_surface_commit(&mut self, surface: &WlSurface) {
+        // Record the surface's first commit so project affinity locks at the
+        // right time even when the project-surface is created post-commit.
+        crate::protocols::project::mark_surface_committed(surface);
         if let Some(window) = self.window_for_toplevel_surface(surface) {
             window.on_commit();
             self.refresh_foreign_toplevel(&window);

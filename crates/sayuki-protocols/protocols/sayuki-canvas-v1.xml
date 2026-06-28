@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="sayuki_canvas_v1">
+  <copyright>
+    Copyright (c) 2026 Sayuki contributors. Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="unbounded-canvas viewport observer and controller">
+    Sayuki presents windows on an unbounded canvas viewed through a per-output
+    camera (viewport). This protocol exposes that camera to trusted first-party
+    clients: observer events drive minimap and overview surfaces, and controller
+    requests let a shell pan, zoom, and focus the camera. No standard protocol
+    models a camera over an unbounded canvas.
+
+    Warning! The protocol described in this file is currently in the testing
+    phase. Backward compatible changes may be added together with the
+    corresponding interface version bump. Backward incompatible changes can only
+    be done by creating a new major version of the extension.
+  </description>
+
+  <interface name="zsayuki_canvas_manager_v1" version="1">
+    <description summary="factory for per-output canvas objects">
+      The global object, advertised only to trusted first-party clients. It
+      creates zsayuki_canvas_v1 objects, each scoped to one wl_output.
+    </description>
+
+    <request name="get_canvas">
+      <description summary="observe and control one output's camera">
+        Create a canvas object scoped to the given wl_output. The object
+        receives observer events for that output's camera and accepts controller
+        requests that drive it.
+      </description>
+      <arg name="id" type="new_id" interface="zsayuki_canvas_v1"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroy the manager object. Canvas objects created by this manager are
+        unaffected.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="zsayuki_canvas_v1" version="1">
+    <description summary="one output's camera over the canvas">
+      Observer events report the camera state and the windows visible on this
+      output's canvas; they are emitted in atomic batches terminated by done,
+      mirroring wl_output. Controller requests drive the same internal viewport
+      operations as Sayuki's keybindings and IPC, so the protocol is just an
+      additional caller.
+    </description>
+
+    <event name="viewport">
+      <description summary="camera location and zoom">
+        The top-left canvas coordinate shown on this output and the zoom factor.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="zoom" type="fixed"/>
+    </event>
+
+    <event name="window_geometry">
+      <description summary="a window's canvas geometry">
+        Position, size, and focus state of a window on this canvas, keyed by its
+        stable window id. Re-sent for every visible window in a batch.
+      </description>
+      <arg name="id" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="focused" type="uint" summary="non-zero if keyboard-focused"/>
+    </event>
+
+    <event name="window_removed">
+      <description summary="a window left this canvas">
+        The window with this id is no longer present on the canvas.
+      </description>
+      <arg name="id" type="uint"/>
+    </event>
+
+    <event name="project_changed">
+      <description summary="the canvas shown on this output changed">
+        The output now shows a different project's canvas.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="done">
+      <description summary="end of an atomic update batch">
+        All preceding events since the last done form one atomic update; a
+        client should apply them together and repaint once.
+      </description>
+    </event>
+
+    <request name="pan">
+      <description summary="set the absolute camera position">
+        Move the camera so that x,y is the canvas coordinate at the output's
+        top-left corner. Clamped to the compositor's pan limits.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="pan_by">
+      <description summary="pan the camera by a delta">
+        Move the camera by dx,dy canvas units. Clamped to the compositor's pan
+        limits.
+      </description>
+      <arg name="dx" type="int"/>
+      <arg name="dy" type="int"/>
+    </request>
+
+    <request name="zoom">
+      <description summary="set the zoom factor">
+        Set the camera zoom, clamped to the compositor's minimum and maximum
+        zoom.
+      </description>
+      <arg name="factor" type="fixed"/>
+    </request>
+
+    <request name="focus_window">
+      <description summary="reveal and focus a window">
+        Pan the camera to reveal the window with the given id and give it focus.
+      </description>
+      <arg name="id" type="uint"/>
+    </request>
+
+    <request name="overview">
+      <description summary="toggle fit-all overview">
+        Enable (non-zero) or disable (zero) the fit-all overview for this
+        output.
+      </description>
+      <arg name="enable" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the canvas object">
+        Destroy the canvas object. The compositor stops sending observer events
+        to it.
+      </description>
+    </request>
+  </interface>
+</protocol>

@@ -503,6 +503,22 @@ impl WindowManager {
         &mut self.canvases[index]
     }
 
+    /// Shared access to a specific canvas.
+    pub fn canvas(&self, id: CanvasId) -> &Canvas {
+        let index = self.index_of(id);
+        &self.canvases[index]
+    }
+
+    /// The id of an existing canvas with this project/numeric name, without
+    /// creating one (unlike [`Self::canvas_for`]). Resolves declared project
+    /// affinity to an open canvas; `None` lets the caller fall back.
+    pub fn canvas_by_name(&self, name: &str) -> Option<CanvasId> {
+        self.canvases
+            .iter()
+            .find(|canvas| canvas.name == name)
+            .map(|canvas| canvas.id)
+    }
+
     /// The bounding rectangle of the active canvas's per-output **visible
     /// regions** (`[viewport.loc, output_size / zoom]`) — the region the pointer
     /// is clamped to so it can travel across every monitor and the gaps between
@@ -720,5 +736,25 @@ mod tests {
         // Toggling flips the mode and reports the new value.
         assert_eq!(canvas.toggle_layout_mode(), LayoutMode::Floating);
         assert_eq!(canvas.layout_mode(), LayoutMode::Floating);
+    }
+
+    #[test]
+    fn canvas_by_name_finds_existing_without_creating() {
+        let manager = WindowManager::new(
+            &[],
+            PanCouple::Independent,
+            SnapConfig::default(),
+            TilingConfig::default(),
+            vec![("blog".to_owned(), ProjectContext::default())],
+        );
+
+        // The default canvas "1" and the configured project canvas resolve.
+        assert!(manager.canvas_by_name("1").is_some());
+        let blog = manager
+            .canvas_by_name("blog")
+            .expect("configured project canvas exists");
+        assert!(!manager.is_active(blog));
+        // An unknown name resolves to nothing and creates no canvas.
+        assert_eq!(manager.canvas_by_name("missing"), None);
     }
 }

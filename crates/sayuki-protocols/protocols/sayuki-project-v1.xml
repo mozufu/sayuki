@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="sayuki_project_v1">
+  <copyright>
+    Copyright (c) 2026 Sayuki contributors. Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="per-surface project affinity">
+    This protocol lets a trusted first-party client declare, before a toplevel
+    maps, which Sayuki project (canvas) a surface belongs to and where it should
+    sit in that canvas's free-floating coordinate space.
+
+    Sayuki organizes windows as a viewport over an unbounded canvas, one canvas
+    per project. Without this protocol the compositor can only guess a surface's
+    project affinity heuristically (by app_id or pid) after the fact; this
+    protocol makes placement race-free and authoritative at map time.
+
+    Warning! The protocol described in this file is currently in the testing
+    phase. Backward compatible changes may be added together with the
+    corresponding interface version bump. Backward incompatible changes can only
+    be done by creating a new major version of the extension.
+  </description>
+
+  <interface name="zsayuki_project_manager_v1" version="1">
+    <description summary="factory for project-surface objects">
+      The global object, advertised only to trusted first-party clients. It
+      creates zsayuki_project_surface_v1 objects that tag a wl_surface with
+      project affinity.
+    </description>
+
+    <enum name="error">
+      <entry name="already_constructed" value="0"
+             summary="the wl_surface already has a project-surface object"/>
+    </enum>
+
+    <request name="get_project_surface">
+      <description summary="assign project affinity to a surface">
+        Create a project-surface object for the given wl_surface. The surface
+        must have, or be about to be given, the xdg_toplevel role.
+
+        Requesting a second project-surface for a wl_surface that already has one
+        is a protocol error (already_constructed).
+      </description>
+      <arg name="id" type="new_id" interface="zsayuki_project_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroy the manager object. Project-surface objects created by this
+        manager are unaffected.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="zsayuki_project_surface_v1" version="1">
+    <description summary="project affinity for a single surface">
+      Declares the project a toplevel belongs to and its persistent canvas
+      coordinates. All set_ requests must be sent before the surface's first
+      commit (analogous to assigning an xdg role); sending them after the
+      surface has mapped is a protocol error (already_mapped).
+
+      After placement the compositor reports the authoritative project name and
+      canvas position the surface actually landed on.
+    </description>
+
+    <enum name="error">
+      <entry name="already_mapped" value="0"
+             summary="a set_ request was sent after the surface committed"/>
+    </enum>
+
+    <request name="set_project">
+      <description summary="choose the project canvas">
+        Set the name of the project (canvas) this surface should live on. If no
+        project with this name is known the compositor places the surface on the
+        current project instead and reports the fallback via the assigned event.
+
+        Must be sent before the first commit of the wl_surface.
+      </description>
+      <arg name="name" type="string"/>
+    </request>
+
+    <request name="set_canvas_position">
+      <description summary="set persistent canvas coordinates">
+        Set the surface's top-left position in the project canvas's
+        free-floating coordinate space. The compositor may clamp the value to
+        its canvas pan limits.
+
+        Must be sent before the first commit of the wl_surface.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="set_rule_hint">
+      <description summary="provide a placement rule hint">
+        Provide a free-form window-rule hint (for example "floating", "pin", or
+        "fullscreen") applied at map time. Unknown keys are ignored.
+
+        Must be sent before the first commit of the wl_surface.
+      </description>
+      <arg name="key" type="string"/>
+      <arg name="value" type="string"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the project-surface object">
+        Destroy the project-surface object. Affinity already applied at map time
+        is retained; it is not re-evaluated on later commits.
+      </description>
+    </request>
+
+    <event name="assigned">
+      <description summary="authoritative project assignment">
+        Sent once the surface has been placed, carrying the name of the project
+        canvas it actually landed on (which may differ from a requested but
+        unknown project name).
+      </description>
+      <arg name="project_name" type="string"/>
+    </event>
+
+    <event name="canvas_position">
+      <description summary="authoritative canvas position">
+        Sent once the surface has been placed, carrying its final top-left
+        position in the project canvas after any clamping.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+  </interface>
+</protocol>

@@ -1705,6 +1705,7 @@ dependencies = [
  "clap",
  "inotify",
  "sayuki-ipc",
+ "sayuki-protocols",
  "sayuki-wm",
  "serde",
  "serde_json",
@@ -1737,6 +1738,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sayuki-protocols"
+version = "0.1.0"
+dependencies = [
+ "wayland-backend",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

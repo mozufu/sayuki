@@ -508,7 +508,7 @@ impl SecurityContextHandler for SayukiState {
             .loop_handle
             .insert_source(source, move |stream, _, _state| {
                 if let Err(error) = display_handle
-                    .insert_client(stream, Arc::new(crate::wayland::ClientState::default()))
+                    .insert_client(stream, Arc::new(crate::wayland::ClientState::sandboxed()))
                 {
                     warn!(?error, "failed to accept sandboxed Wayland client");
                 }
@@ -550,9 +550,48 @@ impl ShmHandler for SayukiState {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct ClientState {
     compositor_state: CompositorClientState,
+    /// Whether the client connected over the privileged compositor socket
+    /// (`true`) rather than through a security-context sandbox (`false`).
+    /// First-party `zsayuki_*` globals (milestone 9) are advertised only to
+    /// trusted clients, and only trusted clients may bind the security-context
+    /// manager.
+    trusted: bool,
+}
+
+impl ClientState {
+    /// State for a client on the main compositor socket: first-party, trusted.
+    pub(crate) fn trusted() -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            trusted: true,
+        }
+    }
+
+    /// State for a client accepted through a security-context listener:
+    /// sandboxed, untrusted.
+    pub(crate) fn sandboxed() -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            trusted: false,
+        }
+    }
+
+    /// Whether this client is trusted (connected outside any sandbox).
+    pub(crate) fn is_trusted(&self) -> bool {
+        self.trusted
+    }
+}
+
+/// Returns whether `client` is a trusted first-party connection.
+///
+/// Clients with no [`ClientState`] are treated as untrusted, so the trust gate
+/// fails closed.
+pub(crate) fn is_client_trusted(client: &Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_some_and(ClientState::is_trusted)
 }
 
 impl ClientData for ClientState {
@@ -573,4 +612,19 @@ fn grab_started_on_surface(
         .as_ref()
         .map(|(focused, _)| focused.id().same_client_as(&surface.id()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientState;
+
+    // Security invariant: a client accepted through a security-context sandbox
+    // must never be trusted, while a main-socket client is. The zsayuki_*
+    // trust gate (milestone 9) and the security-context-manager filter both
+    // rely on this distinction.
+    #[test]
+    fn sandboxed_clients_are_never_trusted() {
+        assert!(ClientState::trusted().is_trusted());
+        assert!(!ClientState::sandboxed().is_trusted());
+    }
 }

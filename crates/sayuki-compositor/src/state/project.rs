@@ -11,6 +11,7 @@ use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
     desktop::Window,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point},
     wayland::{
         compositor::with_states, foreign_toplevel_list::ForeignToplevelHandle,
         shell::xdg::XdgToplevelSurfaceData,
@@ -23,6 +24,7 @@ use crate::{
     input::spawn::SpawnContext,
     output,
     project::{ProjectConfig, ProjectContext, SayukiProject, TrustStore, resolve_context},
+    protocols::project::AffinityPhase,
     wm::{CanvasId, LayoutMode, viewport},
 };
 
@@ -66,12 +68,24 @@ impl SayukiState {
         }
     }
 
-    /// Place a window directly into a project canvas (window-rule routing): it
-    /// becomes that canvas's focused window without disturbing the active canvas.
-    fn place_window_in(&mut self, target: CanvasId, window: Window) {
+    /// Place a window into a project canvas at `position` (pan-clamped) when
+    /// given, else at the next staggered spot. It becomes that canvas's focused
+    /// window without disturbing the active canvas. Returns the final location.
+    fn place_window_at(
+        &mut self,
+        target: CanvasId,
+        window: Window,
+        position: Option<Point<i32, Logical>>,
+    ) -> Point<i32, Logical> {
         let region = self.primary_output_geometry();
-        let location = viewport::placement_location(region, self.next_window_index);
-        self.next_window_index = self.next_window_index.wrapping_add(1);
+        let location = match position {
+            Some(position) => viewport::clamp_pan(position),
+            None => {
+                let location = viewport::placement_location(region, self.next_window_index);
+                self.next_window_index = self.next_window_index.wrapping_add(1);
+                location
+            }
+        };
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 state.bounds = Some(region.size);
@@ -82,6 +96,7 @@ impl SayukiState {
             .space_mut()
             .map_element(window.clone(), location, false);
         canvas.focus(window);
+        location
     }
 
     /// Evaluate window rules once, when a queued window's client has provided an
@@ -100,6 +115,12 @@ impl SayukiState {
             return;
         }
         self.pending_rules.remove(position);
+
+        // An explicit per-surface project affinity is authoritative; it wins
+        // over the heuristic app_id/title pin rules below.
+        if self.consume_project_affinity(window, surface) {
+            return;
+        }
 
         let target = match self.wm.pin_target(app_id.as_deref(), title.as_deref()) {
             Some(target) if !self.wm.is_active(target) => {
@@ -122,12 +143,26 @@ impl SayukiState {
     /// canvas by a switch/move before its first qualifying commit, so drop it
     /// from wherever it lives, then re-focus the active tail if it lost focus.
     fn reroute_window(&mut self, window: &Window, target: CanvasId) {
+        self.reroute_window_to(window, target, None);
+    }
+
+    /// Move a mapped window to a project canvas at `position` (pan-clamped) when
+    /// given, preserving active focus. Generalises [`Self::reroute_window`] for
+    /// the explicit coordinates of a project-affinity placement and returns the
+    /// final location.
+    fn reroute_window_to(
+        &mut self,
+        window: &Window,
+        target: CanvasId,
+        position: Option<Point<i32, Logical>>,
+    ) -> Point<i32, Logical> {
         let was_active_focus = self.wm.remove_window(window);
-        self.place_window_in(target, window.clone());
+        let location = self.place_window_at(target, window.clone(), position);
         if was_active_focus {
             let focus = self.wm.active().focused().cloned();
             self.apply_focus(focus);
         }
+        location
     }
 
     /// Decide whether a freshly routed `window` tiles on `canvas_id`: a matching
@@ -141,11 +176,18 @@ impl SayukiState {
         app_id: Option<&str>,
         title: Option<&str>,
     ) {
-        let canvas = self.wm.canvas_mut(canvas_id);
+        let canvas = self.wm.canvas(canvas_id);
         let tile = match canvas.rule_tiling(app_id, title) {
             Some(force) => force,
             None => canvas.layout_mode() == LayoutMode::Tiling,
         };
+        self.set_canvas_tiling(window, canvas_id, tile);
+    }
+
+    /// Tile or float `window` on `canvas_id`, re-laying-out the active canvas
+    /// when it is the one affected; an inactive target tiles lazily when shown.
+    fn set_canvas_tiling(&mut self, window: &Window, canvas_id: CanvasId, tile: bool) {
+        let canvas = self.wm.canvas_mut(canvas_id);
         if tile {
             canvas.tile(window.clone());
         } else {
@@ -154,6 +196,58 @@ impl SayukiState {
         if self.wm.is_active(canvas_id) {
             self.relayout_active_tiling();
         }
+    }
+
+    /// Apply a surface's declared project affinity as it maps: route it to the
+    /// named canvas (falling back to the active project when the name is
+    /// unknown) at the requested pan-clamped coordinates, apply rule hints, and
+    /// report the authoritative placement back to the client. Returns whether an
+    /// affinity was consumed.
+    fn consume_project_affinity(&mut self, window: &Window, surface: &WlSurface) -> bool {
+        let Some(index) = self.project_affinity.iter().position(|affinity| {
+            &affinity.surface == surface && affinity.phase == AffinityPhase::Pending
+        }) else {
+            return false;
+        };
+        let project = self.project_affinity[index].project.clone();
+        let position = self.project_affinity[index].position;
+        let hints = std::mem::take(&mut self.project_affinity[index].hints);
+
+        let target = project
+            .as_deref()
+            .and_then(|name| self.wm.canvas_by_name(name))
+            .unwrap_or_else(|| self.wm.active().id());
+        let target_name = self.wm.canvas(target).name().to_owned();
+
+        let location = self.reroute_window_to(window, target, position);
+        self.apply_affinity_tiling(window, target, &hints);
+
+        let affinity = &mut self.project_affinity[index];
+        affinity.phase = AffinityPhase::Mapped;
+        affinity.object.assigned(target_name);
+        affinity.object.canvas_position(location.x, location.y);
+        true
+    }
+
+    /// Apply project-affinity rule hints. Only `floating` is acted on (true
+    /// floats, false tiles); when absent the canvas's layout mode decides. Other
+    /// hint keys are reserved and ignored, per the protocol's unknown-key rule.
+    fn apply_affinity_tiling(
+        &mut self,
+        window: &Window,
+        canvas_id: CanvasId,
+        hints: &[(String, String)],
+    ) {
+        let floating = hints
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "floating")
+            .map(|(_, value)| parse_hint_bool(value));
+        let tile = match floating {
+            Some(floating) => !floating,
+            None => self.wm.canvas(canvas_id).layout_mode() == LayoutMode::Tiling,
+        };
+        self.set_canvas_tiling(window, canvas_id, tile);
     }
 
     /// Announce a freshly mapped toplevel to `ext-foreign-toplevel-list`
@@ -207,6 +301,14 @@ fn surface_has_buffer(surface: &WlSurface) -> bool {
     with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
 }
 
+/// Parse a rule-hint truthiness value; unrecognised or absent values are false.
+fn parse_hint_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// The committed `app_id`/`title` of a toplevel window, for window-rule matching.
 pub(crate) fn window_identity(window: &Window) -> (Option<String>, Option<String>) {
     let Some(toplevel) = window.toplevel() else {
@@ -249,4 +351,19 @@ pub(super) fn resolve_project_contexts(
             (config.name.clone(), context)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hint_bool;
+
+    #[test]
+    fn rule_hint_bool_parses_truthy_values() {
+        for truthy in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(parse_hint_bool(truthy), "{truthy:?} should be true");
+        }
+        for falsy in ["0", "false", "", "off", "floating"] {
+            assert!(!parse_hint_bool(falsy), "{falsy:?} should be false");
+        }
+    }
 }

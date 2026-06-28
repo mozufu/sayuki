@@ -252,16 +252,29 @@ See `docs/milestone-9-first-party-protocols.md` for the detailed spec (interface
 sketches, the security-context trust gate, the shared M8 emission seam, and the
 crate/build plumbing).
 
-- [ ] **`sayuki-protocols` crate** — `protocols/*.xml` + `build.rs` running
-  `wayland-scanner`; generated bindings only, with `GlobalDispatch`/`Dispatch`
-  impls in the compositor (the hand-rolled `screencopy.rs` pattern).
-- [ ] **Security-context trust gate** (finishes M6 Tier 2 enforcement) — replace
-  the `|_| true` filter with a real per-client trust predicate; advertise the
-  `zsayuki_*` globals only to trusted first-party clients, withhold from sandboxes.
-- [ ] **`zsayuki_project_v1`** — per-surface project affinity: a client tags an
+- [x] **`sayuki-protocols` crate** — `protocols/*.xml` compiled by the
+  `wayland-scanner` proc-macros (`generate_interfaces!` / `generate_server_code!`;
+  0.31 ships no build-script API, so there is no `build.rs`); generated server
+  bindings only. The `GlobalDispatch`/`Dispatch` impls live in the compositor
+  (the hand-rolled `screencopy.rs` pattern) and land with the `zsayuki_*`
+  interfaces below.
+- [ ] **Security-context trust gate** (finishes M6 Tier 2 enforcement) — *trust
+  mechanism landed*: `|_| true` is replaced by a real per-client trust predicate
+  (`wayland::is_client_trusted`), per-client trust is tracked in `ClientState`
+  (main-socket clients trusted, security-context clients sandboxed, failing
+  closed), and only trusted clients may bind the security-context manager.
+  *Remaining (with `zsayuki_canvas_v1` below)*: trust-gate the canvas global too
+  — the `zsayuki_project_v1` manager already advertises only to trusted clients
+  via `GlobalDispatch::can_view`.
+- [x] **`zsayuki_project_v1`** — per-surface project affinity: a client tags an
   `xdg_toplevel` with project name + persistent canvas coords + rule hints before
   map, so placement is race-free instead of heuristic; closes the M7 gap for
-  externally-spawned windows.
+  externally-spawned windows. *Landed*: `protocols/project.rs` hand-rolls the
+  `GlobalDispatch`/`Dispatch` glue (global trust-gated via `can_view`); affinity
+  locks at the surface's first commit (`already_mapped` after); and
+  `consume_project_affinity` applies it at map time — falling back to the active
+  canvas for an unknown project and reporting the authoritative
+  `assigned`/`canvas_position` back to the client.
 - [ ] **`zsayuki_canvas_v1`** — the unbounded-canvas viewport, per `wl_output`:
   observer events (viewport, window geometry, project change) for minimap/overview
   clients, and controller requests (pan/zoom/focus/overview) for the shell, fed
@@ -303,6 +316,7 @@ Current crates and status:
 | `sayuki-compositor` | populated (binary) | main binary; holds the live state, WM, input, config, render, IPC server, and protocol glue as modules (`state.rs`, `wm/`, `input/`, `config.rs`, `render.rs`, `ipc.rs`, `screencopy.rs`, …) pending extraction |
 | `sayuki-ipc` | populated, in use | wire types + frame codec for the Unix-socket control plane; depended on by the compositor and `sayukictl` |
 | `sayukictl` | populated, in use | command-line IPC client |
+| `sayuki-protocols` | populated (bindings) | generated server bindings for the `zsayuki_*` protocol XML (`project`, `canvas`); `GlobalDispatch`/`Dispatch` impls stay in the compositor |
 | `sayuki-core` | scaffolding | shared runtime primitives (app id, component metadata); target home for Smithay state / event-loop glue and the M9 `zsayuki_*` `Dispatch` impls |
 | `sayuki-wm` | scaffolding | window/workspace/focus/stacking/layout policy types for the canvas model |
 | `sayuki-input` | scaffolding | keybinding, input-action, and xkb policy primitives |
@@ -312,13 +326,6 @@ Current crates and status:
 "Scaffolding" means the crate exists with a doc-commented `lib.rs` but the
 corresponding logic has not yet been moved out of `sayuki-compositor`; extraction
 happens as each interface stabilizes.
-
-Committed, not yet created:
-
-- `sayuki-protocols`: generated bindings for Sayuki's custom protocol XML
-  (`zsayuki_project_v1`, `zsayuki_canvas_v1`); created in milestone 9. Holds
-  generated bindings only — `GlobalDispatch`/`Dispatch` impls stay with the
-  compositor / `sayuki-core`.
 
 Possible later crate:
 

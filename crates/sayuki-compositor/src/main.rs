@@ -1,8 +1,8 @@
 use std::{error::Error, ffi::OsStr, sync::Arc, time::Duration};
 
 use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
-use inotify::{Inotify, WatchMask};
 use clap::Parser;
+use inotify::{Inotify, WatchMask};
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
     delegate_ext_data_control, delegate_foreign_toplevel_list, delegate_fractional_scale,
@@ -35,6 +35,7 @@ mod ipc;
 mod logging;
 mod output;
 mod project;
+mod protocols;
 mod render;
 mod screencopy;
 mod state;
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut client_display_handle = display.handle();
     loop_handle.insert_source(socket_source, move |client_stream, _, _state| {
-        match client_display_handle.insert_client(client_stream, Arc::new(ClientState::default())) {
+        match client_display_handle.insert_client(client_stream, Arc::new(ClientState::trusted())) {
             Ok(client) => debug!(client = ?client.id(), "accepted Wayland client"),
             Err(error) => error!(?error, "failed to accept Wayland client"),
         }
@@ -120,7 +121,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         match Inotify::init() {
             Err(err) => error!(?err, "failed to initialise inotify for config hot-reload"),
             Ok(mut inotify) => {
-                match inotify.watches().add(&dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO) {
+                match inotify
+                    .watches()
+                    .add(&dir, WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO)
+                {
                     Err(err) => error!(?err, "failed to add inotify watch for config dir"),
                     Ok(_) => {
                         let (tx, rx) = calloop::channel::channel::<()>();
@@ -133,9 +137,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         Ok(ev) => ev,
                                         Err(_) => break,
                                     };
-                                    let triggered = events.any(|ev| {
-                                        ev.name.map(|n| n.to_owned()) == config_filename
-                                    });
+                                    let triggered = events
+                                        .any(|ev| ev.name.map(|n| n.to_owned()) == config_filename);
                                     if triggered && tx.send(()).is_err() {
                                         break; // main loop exited, drop watcher
                                     }
@@ -146,7 +149,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             state.reload_config();
                         }) {
                             Err(err) => error!(?err, "failed to register config reload channel"),
-                            Ok(_) => info!(path = %path.display(), "watching config for hot-reload"),
+                            Ok(_) => {
+                                info!(path = %path.display(), "watching config for hot-reload")
+                            }
                         }
                     }
                 }

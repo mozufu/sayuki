@@ -29,6 +29,9 @@ smithay = { version = "0.7", default-features = false, features = [
   "wayland_frontend",
 ] }
 smithay-drm-extras = "0.1"
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+wayland-server = "0.31"
 snafu = "0.9"
 zutai-eval = { path = "../zutai/crates/general/eval" }
 tracing = "0.1"

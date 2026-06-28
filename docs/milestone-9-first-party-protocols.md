@@ -5,7 +5,9 @@ Wayland protocol extensions for the things the **project-oriented** WM model nee
 that no standard protocol expresses and the out-of-band IPC plane cannot reach:
 **per-surface project affinity** and the **unbounded-canvas viewport**.
 
-Status: planned. Builds on milestone 5 (`docs/milestone-5-window-manager-model.md`,
+Status: in progress — the bindings crate, the security-context trust gate, and
+`zsayuki_project_v1` (per-surface project affinity) have landed; `zsayuki_canvas_v1`
+is the remaining item. Builds on milestone 5 (`docs/milestone-5-window-manager-model.md`,
 the canvas/viewport + project session model), milestone 6
 (`docs/milestone-6-desktop-protocols.md`, security-context registration), and
 milestone 7 (`docs/milestone-7-config-and-ipc.md`, the IPC control plane and event
