@@ -3020,6 +3020,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "zutai-eval"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "fast-posit",
  "rustc-hash 2.1.2",
@@ -3037,6 +3038,7 @@ dependencies = [
 [[package]]
 name = "zutai-hir"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "la-arena",
  "rustc-hash 2.1.2",
@@ -3046,6 +3048,7 @@ dependencies = [
 [[package]]
 name = "zutai-im"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "thiserror 2.0.18",
  "zutai-im-syntax",
@@ -3055,6 +3058,7 @@ dependencies = [
 [[package]]
 name = "zutai-im-syntax"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "rustc-hash 2.1.2",
  "unicode-ident",
@@ -3065,6 +3069,7 @@ dependencies = [
 [[package]]
 name = "zutai-semantic"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "rustc-hash 2.1.2",
  "zutai-hir",
@@ -3077,6 +3082,7 @@ dependencies = [
 [[package]]
 name = "zutai-syntax"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "fast-posit",
  "num-bigint",
@@ -3090,6 +3096,7 @@ dependencies = [
 [[package]]
 name = "zutai-thir"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "la-arena",
  "rustc-hash 2.1.2",
@@ -3100,6 +3107,7 @@ dependencies = [
 [[package]]
 name = "zutai-tlc"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"
 dependencies = [
  "la-arena",
  "rustc-hash 2.1.2",
@@ -3111,3 +3119,4 @@ dependencies = [
 [[package]]
 name = "zutai-types"
 version = "0.1.0"
+source = "git+https://github.com/iceice666/zutai.git#eac1ecea746903acf9a9a355d296c130632a3c3f"

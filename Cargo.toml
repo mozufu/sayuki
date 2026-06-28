@@ -33,7 +33,7 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 wayland-server = "0.31"
 snafu = "0.9"
-zutai-eval = { path = "../zutai/crates/general/eval" }
+zutai-eval = { git = "https://github.com/iceice666/zutai.git" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
